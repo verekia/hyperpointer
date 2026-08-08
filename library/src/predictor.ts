@@ -25,8 +25,23 @@
 // the heading of the window's newer half against its older half is just two chords. The arc degenerates to
 // the straight line as the turn rate goes to zero, so straight motion is bit-identical.
 //
-// Freshness is the only stop signal. A stopped pointer sends nothing, so the lead fades out over STOP_MS
-// rather than sailing on at the last fitted speed.
+// Freshness is the only stop signal once the hand has already stopped. A stopped pointer sends nothing, so
+// the lead fades out over STOP_MS rather than sailing on at the last fitted speed.
+//
+// **Braking is believed on thinner evidence than the rest of the fit, and read two ways.** Lead that turns
+// out not to have been needed has to be handed back, and handing it back walks the view backwards under the
+// hand; lead that was never taken is only the lateness this whole thing exists to remove. The two are not
+// the same mistake, so they are not held to the same standard: everything that says the hand is slowing is
+// acted on as it arrives, while everything that says it is speeding up goes on being settled slowly. The
+// two readings are the curvature within the window, and the fitted speed changing across frames — the
+// first is a second derivative over the span and dies on a thin window, the second differences first
+// derivatives over several frames and survives there, and whichever brakes harder is the one taken.
+//
+// The ramp is the other half of it. A first-order lag trails its target by its own time constant times how
+// fast that target is moving, and coming off a flick the target falls faster than at any other time, so
+// most of the overshoot was never in the fit at all — it was the smoothing behind it. That lag is a known
+// quantity rather than a mystery, so it is subtracted rather than filtered away, and the smoothing a shaky
+// device depends on is kept whole.
 //
 // Below a crawl there is no lead at all. Whole mouse counts are all a slow hand produces, and a fit over
 // four of them is mostly quantisation. A caller that keeps what it is given rather than unwinding it keeps
@@ -74,10 +89,15 @@ const ACCEL_NOISE = 20
 // costs nothing because the window is shorter than the buffer.
 const CAPACITY = 128
 const STOP_MS = 32
-// The longest quiet a device is known to keep while still moving decays at this rate per report, so one
-// unusually long gap does not excuse silence forever. Multiplied by the tolerance before it counts.
+// The longest quiet a device is known to keep while still moving decays at this rate per frame that carried
+// input, so one unusually long gap does not excuse silence forever. Multiplied by the tolerance before it
+// counts. Every device here settles at a frame's worth of quiet or less — the slowest two at 16.7ms and the
+// wired mouse and trackpad at none at all — so MAX_QUIET_MS sits above the worst of them with room, and
+// well under anything that would be a hand having stopped. It bounds how long a stop can go unnoticed, so
+// generosity here is paid for on screen.
 const QUIET_DECAY = 0.92
 const QUIET_TOLERANCE = 1.5
+const MAX_QUIET_MS = 24
 const MAX_ELAPSED_MS = 32
 const NEGLIGIBLE_PX = 0.05
 const FRAME_SMOOTHING = 0.1
@@ -91,10 +111,38 @@ const NOISE_EASE = 3
 // How long to settle the judgement about whether the path really bends. That judgement also decides how
 // hard the lead is smoothed, so left to answer freshly every frame it switches the smoothing on and off.
 const CURVE_TRUST_MS = 150
+// The same judgement asked about braking alone, and settled far quicker. A hand comes off a flick in about
+// a tenth of a second, so a judgement that takes CURVE_TRUST_MS to arrive arrives after the hand has already
+// stopped — measured at a lead still pinned to its peak with the hand down to a fifth of its speed.
+// Believing braking early is cheap in a way that believing the rest of the fit early is not: braking only
+// ever subtracts, so the worst a brake read off noise can do is give up a little lead for a frame, where
+// the same mistake made the other way is carried forward as overshoot and has to be handed back.
+const BRAKE_TRUST_MS = 25
+// The window carries two readings of the same braking, and which one is worth having depends entirely on
+// how thickly the device reports. Within the window it is the curvature — a second derivative over the
+// span, which on a trackpad letting go of a long drag peaks at 1.4 times its own noise, so it is at most
+// part-believed and only for a frame or two. Across frames it is the fitted speed changing, which
+// differences two first derivatives over a baseline of several frames, each already averaged over a whole
+// window: the same hand on the same device reads there at 4.2 times its noise and is believed outright.
+// So the slow device is not one whose braking cannot be seen, only one whose braking cannot be seen in
+// the curvature.
+//
+// How long to average that trend over, and how much it wobbles for a given amount of quantisation over a
+// window of a given length and sample count — the same question ACCEL_NOISE answers for the curvature,
+// and answered the same way, so it holds across devices rather than being a figure per device.
+const TREND_MS = 25
+const TREND_NOISE = 3.6
 // How far back the heading a reversal is judged against is remembered, and how much of the interval
 // between recent reversals may be extrapolated over.
 const HEADING_MEMORY_MS = 25
 const REVERSAL_HORIZON = 0.4
+
+// How long the ramp takes to close on what it is pointed at. A guess from a thin window is smoothed harder
+// than one from a full one: the ramp costs a good device nothing and is the difference between a usable
+// picture and a shaking one on a device that reports a handful of times per window, and there is no telling
+// the two apart in advance. Shared, because the ramp and the compensation for the ramp's own lag have to be
+// talking about the same number or the correction is for a filter that is not there.
+const rampLength = (decayMs: number, confidence: number) => Math.max(decayMs * (1 + NOISE_EASE * (1 - confidence)), 1)
 
 export type PredictorOptions = {
   /** How many display refreshes ahead to guess. This is a count of refreshes rather than a duration
@@ -161,6 +209,13 @@ export const createPointerPredictor = (options: PredictorOptions = {}) => {
   // How much the window behind the last guess was worth. Drives how hard the guess is smoothed.
   let confidence = 1
   let curveConfidence = 0
+  // How far the path is believed to be braking, settled apart from the bend as a whole and much faster.
+  let brakeConfidence = 0
+  // The fitted speed as it was at the previous guess, and how it has been moving since — the reading of
+  // the braking that survives on a device too thin to carry a curvature. Negative marks it as having no
+  // previous speed to difference against, which is not the same as a previous speed of zero.
+  let lastSpeed = -1
+  let speedTrend = 0
   // Believed turn rate of the path, rad/ms, so the eased lead can be carried around with the heading.
   let carriedTurn = 0
   // A hand that has lately been doubling back, and how long it went between doing so. At the moment a
@@ -203,7 +258,7 @@ export const createPointerPredictor = (options: PredictorOptions = {}) => {
   // it actually went. Positions are centred on the newest sample, so the evaluation point is the origin,
   // the constant term drops out of every answer, and the normal equations stay well conditioned however
   // long the session runs.
-  const fit = (horizonMs: number, deltaMs: number) => {
+  const fit = (horizonMs: number, deltaMs: number, decayMs: number) => {
     const newest = (head - 1 + CAPACITY) % CAPACITY
     const newestT = times[newest]!
     const newestX = xs[newest]!
@@ -303,6 +358,8 @@ export const createPointerPredictor = (options: PredictorOptions = {}) => {
     // hard a path of whole mouse counts appears to bend when it is dead straight. Sample count alone was
     // the wrong question — it counts the samples that carried motion, so the start of a flick on a fast
     // mouse looks exactly as thin as a slow device, and that is the moment the bend matters most.
+    // How much a least-squares curvature wobbles for this much quantisation over a window this long and
+    // this well populated. Every judgement about whether a bend is real is asked against it.
     const bendFloor = (ACCEL_NOISE * QUANTISATION_PX) / (span * span * Math.sqrt(used))
     const measured =
       bendFloor > 0 ? Math.max(0, Math.min(1, (Math.hypot(bendX, bendY) / bendFloor - 1) / (CURVE_SNR - 1))) : 0
@@ -313,12 +370,9 @@ export const createPointerPredictor = (options: PredictorOptions = {}) => {
     // full trust regardless of this.
     curveConfidence += (measured - curveConfidence) * (1 - Math.exp(-deltaMs / CURVE_TRUST_MS))
     const curveTrust = curveConfidence
-    confidence = curveTrust
 
     const vx = straightX + (curvedX - straightX) * curveTrust
     const vy = straightY + (curvedY - straightY) * curveTrust
-    const ax = bendX * curveTrust
-    const ay = bendY * curveTrust
 
     const speedNow = Math.hypot(vx, vy)
     if (speedNow < 1e-6) return false
@@ -354,24 +408,84 @@ export const createPointerPredictor = (options: PredictorOptions = {}) => {
     // second derivative taken off whole mouse counts wobbles by a few pixels of lead even when the hand is
     // going at a dead constant speed. Subtract what quantisation alone would produce, so constant speed
     // reads as constant and a flick still reads as a flick.
-    const accelerationFloor = (ACCEL_NOISE * QUANTISATION_PX) / (span * span * Math.sqrt(used))
-    const alongRaw = ax * tx + ay * ty
-    const alongAcceleration = Math.sign(alongRaw) * Math.max(0, Math.abs(alongRaw) - accelerationFloor)
+    const bendAlong = bendX * tx + bendY * ty
+    const alongRaw = bendAlong * curveTrust
+    let alongAcceleration = Math.sign(alongRaw) * Math.max(0, Math.abs(alongRaw) - bendFloor)
+
+    // Braking is judged on its own, against the same noise floor but settled over BRAKE_TRUST_MS rather
+    // than CURVE_TRUST_MS, and gated once rather than twice — shrinking the bend by how far it is believed
+    // and then taking the whole floor off what is left asks the same question of the same quantity twice,
+    // which zeroed the first three frames of every stop.
+    //
+    // Only ever taken when it brakes harder than the settled reading does, so this can subtract lead and
+    // never add it: a stop is seen sooner or exactly as before, never later.
+    const brakeMeasured =
+      bendAlong < 0 && bendFloor > 0 ? Math.max(0, Math.min(1, (-bendAlong / bendFloor - 1) / (CURVE_SNR - 1))) : 0
+    brakeConfidence += (brakeMeasured - brakeConfidence) * (1 - Math.exp(-deltaMs / BRAKE_TRUST_MS))
+    const brakeTrust = brakeConfidence
+    if (bendAlong < 0) {
+      alongAcceleration = Math.min(alongAcceleration, -Math.max(0, -bendAlong - bendFloor) * brakeTrust)
+    }
+
+    // The same braking read across frames instead of within the window: how the fitted speed itself has
+    // been moving. Its floor falls off one power of the span rather than two and is divided by the baseline
+    // it is differenced over, which is why it survives on a window the curvature cannot be read from at all.
+    //
+    // Taken by the same rule as everything else here — whichever reading brakes harder wins, so a device
+    // thick enough to carry a curvature is unaffected by this and a device that is not gets a stop it would
+    // otherwise not have seen. Braking only, so a speed picking up is left to the curvature.
+    if (lastSpeed >= 0 && deltaMs > 0) {
+      speedTrend += ((speedNow - lastSpeed) / deltaMs - speedTrend) * (1 - Math.exp(-deltaMs / TREND_MS))
+    }
+    lastSpeed = speedNow
+    const trendFloor = (TREND_NOISE * QUANTISATION_PX) / (span * Math.sqrt(used) * TREND_MS)
+    if (speedTrend < 0 && trendFloor > 0) {
+      const believed = Math.max(0, Math.min(1, (-speedTrend / trendFloor - 1) / (CURVE_SNR - 1)))
+      alongAcceleration = Math.min(alongAcceleration, speedTrend * believed)
+    }
+
+    // The straight fit's slope is the speed averaged across the window, which is the speed the hand had
+    // half a window ago. On a hand at constant speed that is the same number and the distinction does not
+    // arise; into a stop it is the speed the hand has already left behind, and leading from it is worth
+    // most of a frame of overshoot on its own. The parabola's slope is the speed at the newest sample, so
+    // the gap between the two is what the window says has already been given up. Taken only as far as
+    // braking is believed beyond the settled reading, so nothing is subtracted twice.
+    const givenUp = Math.min(0, curvedX * tx + curvedY * ty - (straightX * tx + straightY * ty))
+    const speedAlong = Math.max(0, speedNow + givenUp * Math.max(0, brakeTrust - curveTrust))
+
+    // How hard to smooth the lead. Read off the bend alone this asks whether the path is straight, and
+    // answers a dead-steady cruise with the longest ramp there is — four times decayMs at the exact moment
+    // the hand is most likely to come off the flick and the target about to move faster than at any other
+    // time. What the ramp needs to know is whether there is anything to track, and braking is something to
+    // track whether or not the path bends, so a stop no longer has to drag the ramp along behind it.
+    confidence = Math.max(curveTrust, brakeTrust)
+    const rampMs = rampLength(decayMs, confidence)
     // Never guess much further ahead than this hand has been going between turning round. Past that the
     // guess is extrapolating through a reversal it has no way to see, and on a quick shake it ran further
     // than the whole width of the motion.
     let horizon = Math.min(horizonMs, reversalPeriodMs * REVERSAL_HORIZON)
-    if (alongAcceleration < 0 && speedNow + alongAcceleration * horizon < 0) {
-      horizon = -speedNow / alongAcceleration
+    if (alongAcceleration < 0 && speedAlong + alongAcceleration * horizon < 0) {
+      horizon = -speedAlong / alongAcceleration
     }
-    // The ramp is a first-order lag, so it trails its target by its own time constant times however fast
-    // that target is genuinely moving — 18px of the 53 a flick costs, more than the estimator and the
-    // model together. How fast the target moves is not a mystery to be differentiated out of a noisy
-    // signal: the target is speed over the horizon, so it moves at the acceleration over the horizon, and
-    // the acceleration is already here and already gated. Handing the ramp a target that far ahead leaves
-    // it arriving on time. A hand at constant speed has no acceleration, so nothing is added and none of
-    // the smoothing is given up where it is doing the work.
-    const distance = speedNow * horizon + 0.5 * alongAcceleration * horizon * horizon
+    // Where the hand will be, which is the ordinary kinematic answer.
+    const travelled = speedAlong * horizon + 0.5 * alongAcceleration * horizon * horizon
+
+    // The ramp is a first-order lag, so it trails whatever it is pointed at by its own time constant times
+    // however fast that target is genuinely moving. Into a stop the target falls at the braking rate over
+    // the horizon, and the trailing is worth more than everything else here put together: with the fit
+    // reading the stop correctly the target was down to 16px while the lead was still holding 37.
+    //
+    // How fast the target moves is not a mystery to be differentiated out of a noisy signal — the target is
+    // speed over the horizon, so it moves at the acceleration over the horizon, and the acceleration is
+    // already here and already gated. Pointing the ramp that far past the hand leaves it arriving on time.
+    // A hand at constant speed has no acceleration, so nothing is subtracted and none of the smoothing is
+    // given up where it is doing the work.
+    //
+    // Braking only. Compensating the same lag on the way up would be spending the smoothing exactly where
+    // it was bought — the noise a fit makes on a hand picking up speed is the thing the ramp is for, and
+    // trailing on the way up costs nothing worse than the lateness this whole library exists to remove.
+    const rampLag = alongAcceleration < 0 ? alongAcceleration * horizon * rampMs : 0
+    const distance = Math.max(0, travelled + rampLag)
 
     // Turn rate straight off the path: the heading of the newer half of the window against the heading of
     // its older half, which is two chords rather than a second derivative.
@@ -439,6 +553,9 @@ export const createPointerPredictor = (options: PredictorOptions = {}) => {
 
     const newestT = count > 0 ? times[(head - 1 + CAPACITY) % CAPACITY]! : 0
     const hadInput = count > 0 && newestT > lastSeenNewest
+    // Whether these samples landed on a window that was still standing, or on one the last stop had
+    // already dropped. Read before it is overwritten, because that is the whole question.
+    const resumedOntoWindow = lastSeenNewest > 0
     lastSeenNewest = newestT
 
     // Silence is the only evidence a hand has stopped, but how long a moving hand goes quiet is a property
@@ -447,7 +564,27 @@ export const createPointerPredictor = (options: PredictorOptions = {}) => {
     // between reports and back up on the next one — a four-fold flicker on a Bluetooth mouse, while the
     // hand moved perfectly steadily. So the quiet each device is known to keep is tolerated first, and
     // only what exceeds it counts as stopping.
-    if (hadInput) quietMs = Math.max(quietMs * QUIET_DECAY, msSinceInput)
+    // What is being learned here is how long this device goes quiet *while the hand is still moving*, and
+    // the silence that just ended is only evidence of that if the hand was in fact moving through it. Most
+    // silences are not: they are the hand sitting still between one movement and the next, and taken at
+    // face value they teach the predictor that this device reports three times a second. A quarter-second
+    // pause before a flick was learned as a quarter-second of tolerated quiet, so the flick that followed
+    // it stayed live long after the hand had stopped and the ramp went on climbing towards a window of
+    // stale samples — the marker sailed on across the screen with the hand already still.
+    //
+    // The predictor has already answered that question about this silence, though, and the answer is
+    // sitting right here: a silence it judged long enough to be a stop dropped the window and left nothing
+    // behind it. So a gap that resumes onto a cleared window is one this device was never proven to have
+    // been merely slow across, and there is nothing in it to learn. A device that genuinely reports in
+    // bursts never gets that far — its gaps are shorter than the fade, which is what the tolerance is for.
+    //
+    // MAX_QUIET_MS sits under that as a plain backstop, since a gap can be far too long to be a report
+    // interval while still being too short to have faded: no device reports that slowly while being moved.
+    if (hadInput && resumedOntoWindow) {
+      quietMs = Math.max(quietMs * QUIET_DECAY, Math.min(msSinceInput, MAX_QUIET_MS))
+    } else if (hadInput) {
+      quietMs *= QUIET_DECAY
+    }
     msSinceInput = hadInput ? 0 : msSinceInput + deltaMs
 
     const tolerated = Math.max(quietMs * QUIET_TOLERANCE, frameMs)
@@ -480,7 +617,14 @@ export const createPointerPredictor = (options: PredictorOptions = {}) => {
 
     out.x = 0
     out.y = 0
-    if (count > 0 && freshness > 0) fit(horizon, deltaMs)
+    // Unlike the two above, which the fit assigns outright, the brake is settled across frames — so it is
+    // dropped only when there is no guess behind it at all, or a stale brake goes on shortening the ramp
+    // through a fade that should run at the ordinary rate.
+    if (!(count > 0 && freshness > 0 && fit(horizon, deltaMs, decayMs))) {
+      brakeConfidence = 0
+      lastSpeed = -1
+      speedTrend = 0
+    }
 
     let targetX = out.x * freshness
     let targetY = out.y * freshness
@@ -492,9 +636,6 @@ export const createPointerPredictor = (options: PredictorOptions = {}) => {
       targetY = (targetY / magnitude) * cap
     }
 
-    // A guess from a thin window is smoothed harder than one from a full one. The ramp costs a good
-    // device nothing and is the difference between a usable picture and a shaking one on a device that
-    // reports a handful of times per window — and there is no telling the two apart in advance.
     // The ramp is there to smooth how big the guess is, not which way it points. Easing in world axes
     // does both, so a turning hand drags its lead behind the heading by the ramp's own time constant —
     // 27 degrees on an ordinary circle, which lands the guess outside it. Carrying what is already there
@@ -509,7 +650,38 @@ export const createPointerPredictor = (options: PredictorOptions = {}) => {
       leadX = spunX
     }
 
-    const rate = 1 - Math.exp(-deltaMs / Math.max(decayMs * (1 + NOISE_EASE * (1 - confidence)), 1))
+    // A guess that is already fading may not also be growing. The window goes on saying the hand is moving
+    // for as long as it holds the samples from before the stop, and the ramp is still climbing towards
+    // that, so the lead went on rising for several frames after a flick ended — the marker sailing on with
+    // the hand already still. Freshness was pulling the other way the whole time and simply lost: it scales
+    // a target the ramp was nowhere near, so shrinking the target still left it above the lead.
+    //
+    // An empty frame on its own is not the gate: a device that leaves a third of frames empty while moving
+    // perfectly steadily has to keep growing across them, or it holds back and then catches up in one step,
+    // which is worse on screen than the lateness it saves. What counts is an empty frame on a device that
+    // does not have empty frames, and that is exactly what the learned quiet says — a trackpad handing over
+    // one coalesced sample every frame learns a quiet of nothing, so its first silent frame is already
+    // unusual, while a mouse on a radio has to stay silent past its own burst gap before this fires.
+    //
+    // Freshness cannot be the gate because it is far too slow: it does not begin to fade until a whole
+    // frame of silence has passed, and one frame is all it takes. Captured on a trackpad mid-flick, the
+    // frame after the hand stopped carried no samples and no motion at all, and the lead still grew from 46
+    // to 58px on it — a quarter of the guess invented on a frame that learned nothing, and the only frame
+    // the eye gets to see it, because the next one is already being discounted.
+    //
+    // Holding costs a frame of the ramp, which is lateness and nothing worse. Growing on nothing is motion
+    // on screen the hand never made, and a ratchet keeps it for the rest of the session.
+    if (!hadInput && msSinceInput > quietMs * QUIET_TOLERANCE) {
+      const held = Math.hypot(leadX, leadY)
+      const wanted = Math.hypot(targetX, targetY)
+      if (wanted > held) {
+        const scale = held / wanted
+        targetX *= scale
+        targetY *= scale
+      }
+    }
+
+    const rate = 1 - Math.exp(-deltaMs / rampLength(decayMs, confidence))
     leadX += (targetX - leadX) * rate
     leadY += (targetY - leadY) * rate
     if (Math.abs(leadX) < NEGLIGIBLE_PX) leadX = 0
@@ -536,6 +708,9 @@ export const createPointerPredictor = (options: PredictorOptions = {}) => {
     lastSeenNewest = 0
     confidence = 1
     curveConfidence = 0
+    brakeConfidence = 0
+    lastSpeed = -1
+    speedTrend = 0
     carriedTurn = 0
     headingX = 0
     headingY = 0

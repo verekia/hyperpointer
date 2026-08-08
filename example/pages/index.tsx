@@ -29,6 +29,9 @@ import Head from 'next/head'
 
 type Settings = {
   compare: boolean
+  /** The release capture below. Off by default: it exists to read numbers off a real device when something
+   * is in question, and the rig's ordinary job is to be looked at rather than read. */
+  measure: boolean
   leadFrames: number
   capPx: number
   hideCursor: boolean
@@ -37,6 +40,31 @@ type Settings = {
 }
 
 const CAP_INDICATOR_HOLD_MS = 400
+// One frame of the capture below. Everything is in CSS pixels and milliseconds, as the browser reported
+// them, so a pasted capture can be read without knowing anything about this page.
+type CaptureRow = {
+  t: number
+  dt: number
+  age: number
+  samples: number
+  span: number
+  /** When the newest sample of this frame was generated, or 0 for a frame that carried none. Speed has to
+   * be measured between these and not between frames: a trackpad's samples do not land on frame
+   * boundaries, so dividing a frame's travel by the frame interval invents accelerations that are only
+   * the sampling wandering. It read as a hand slowing from 22 to 7px/ms that was in fact holding 14.4. */
+  stamp: number
+  moved: number
+  /** What the predictor asked for, before the rig decides whether to draw it. */
+  asked: number
+  /** What the ring was actually drawn at, which is nothing once the hand reads as stopped. */
+  drawn: number
+  live: number
+}
+const HISTORY_FRAMES = 26
+// How many frames to keep recording after the release, so the fade is in the capture too.
+const TAIL_FRAMES = 6
+// Below this the hand was not really going anywhere and the release is not worth keeping.
+const MIN_CAPTURE_PX = 8
 // The leads shown side by side, their colours, and radii that let them nest rather than hide each other.
 const COMPARE_LEADS = [1, 2]
 const COMPARE_COLOURS: [number, number, number][] = [
@@ -54,6 +82,56 @@ const numberParam = (params: URLSearchParams, key: string, fallback: number) => 
   return Number.isFinite(value) ? value : fallback
 }
 
+// A capture as plain text, so it can be pasted somewhere and read without this page. Frames are numbered
+// from the last one that carried any motion, because that is the moment everything after it is measured
+// against: at 0 the hand was still being reported, and anything drawn at 1 or later is the guess standing
+// over a hand that has already stopped.
+const formatCapture = (rows: CaptureRow[], dpr: number, leadFrames: number, capPx: number) => {
+  if (rows.length === 0) return ''
+  let lastMoving = -1
+  for (let i = 0; i < rows.length; i++) if (rows[i]!.moved > 0) lastMoving = i
+
+  const movingRows = rows.filter((_, i) => lastMoving >= 0 && i <= lastMoving && rows[i]!.live >= 1)
+  const movingPeak = movingRows.reduce((peak, r) => Math.max(peak, r.asked), 0)
+  const afterRows = rows.filter((_, i) => i > lastMoving)
+  const flash = afterRows.filter(r => r.drawn > 0)
+
+  const head = [
+    `hyperpointer capture — lead=${leadFrames}f cap=${capPx}px dpr=${dpr} ua=${
+      typeof navigator === 'undefined' ? '?' : navigator.userAgent
+    }`,
+    `peak asked while the hand was still reporting: ${movingPeak.toFixed(1)}px`,
+    `drawn after the last reported motion: ${
+      flash.length === 0
+        ? 'nothing'
+        : `${flash.map(r => r.drawn.toFixed(1)).join(', ')}px over ${flash.length} frame(s)`
+    }`,
+    '',
+    'frame     dt    age   n   span     gap   moved  px/ms   asked   drawn   live',
+  ]
+  // Sample to sample, not frame to frame — see CaptureRow.stamp.
+  let previousStamp = 0
+  const body = rows.map((r, i) => {
+    const label = lastMoving < 0 ? String(i) : `${i - lastMoving > 0 ? '+' : ''}${i - lastMoving}`
+    const gap = r.stamp > 0 && previousStamp > 0 ? r.stamp - previousStamp : 0
+    if (r.stamp > 0) previousStamp = r.stamp
+    return [
+      label.padStart(5),
+      r.dt.toFixed(1).padStart(7),
+      r.age.toFixed(1).padStart(7),
+      String(r.samples).padStart(4),
+      r.span.toFixed(1).padStart(7),
+      gap.toFixed(1).padStart(8),
+      r.moved.toFixed(1).padStart(8),
+      (gap > 0 ? r.moved / gap : 0).toFixed(2).padStart(7),
+      r.asked.toFixed(1).padStart(8),
+      r.drawn.toFixed(1).padStart(8),
+      r.live.toFixed(2).padStart(7),
+    ].join('')
+  })
+  return [...head, ...body].join('\n')
+}
+
 const readSettings = (): Settings => {
   const params = new URLSearchParams(window.location.search)
   return {
@@ -62,6 +140,7 @@ const readSettings = (): Settings => {
     leadFrames: Math.min(Math.max(numberParam(params, 'lead', DEFAULT_LEAD_FRAMES), 0), 8),
     capPx: Math.abs(numberParam(params, 'cap', DEFAULT_MAX_LEAD_PX)),
     compare: params.get('compare') === '1',
+    measure: params.get('measure') === '1',
     hideCursor: params.get('nocursor') === '1',
     hideReported: params.get('noreported') === '1',
     hidePredicted: params.get('nopredicted') === '1',
@@ -74,10 +153,31 @@ const setParam = (key: string, value: string) => {
   window.location.search = params.toString()
 }
 
-const Rig = ({ compare, leadFrames, capPx, hideCursor, hideReported, hidePredicted }: Settings) => {
+const Rig = ({ compare, measure, leadFrames, capPx, hideCursor, hideReported, hidePredicted }: Settings) => {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const [capping, setCapping] = useState(false)
   const [readout, setReadout] = useState<string[]>([])
+  const [capture, setCapture] = useState<{ rows: CaptureRow[]; dpr: number } | null>(null)
+  const [copied, setCopied] = useState(false)
+
+  // C copies, X clears. Reaching for the button is not an option: the pointer has to cross the window to
+  // get there, which is another flick and another release, and the capture being reached for is overwritten
+  // before the click lands. The keyboard is the only way to take a reading without disturbing it.
+  useEffect(() => {
+    if (!measure) return
+    const onKey = (event: KeyboardEvent) => {
+      if (event.metaKey || event.ctrlKey || event.altKey) return
+      const key = event.key.toLowerCase()
+      if (key === 'c' && capture) {
+        navigator.clipboard?.writeText(formatCapture(capture.rows, capture.dpr, leadFrames, capPx))
+        setCopied(true)
+        window.setTimeout(() => setCopied(false), 1200)
+      }
+      if (key === 'x') setCapture(null)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [capture, measure, leadFrames, capPx])
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -170,6 +270,12 @@ const Rig = ({ compare, leadFrames, capPx, hideCursor, hideReported, hidePredict
     }
     window.addEventListener('pointermove', onMove)
 
+    // Enough either side of a release to see the guess climb, hold and let go.
+    const history: CaptureRow[] = []
+    let wasLive = false
+    let runPeak = 0
+    let tail = -1
+
     let raf = 0
     let lastReadout = 0
     let lastFrameAt = performance.now()
@@ -199,12 +305,58 @@ const Rig = ({ compare, leadFrames, capPx, hideCursor, hideReported, hidePredict
       // landed since the last frame looks equivalent and is not: a mouse on a radio leaves a third of
       // frames empty while moving perfectly steadily, and this snapped the marker onto the cursor and back
       // out again on every one of them.
-      const leads = predictors.map(predictor => {
+      // The first predictor's raw answer, kept aside for the capture below: what it asked for, and how
+      // alive it thought the hand was. The rings draw the applied figure, which is not the same number the
+      // moment the hand stops — and telling those two apart is the whole point of capturing anything.
+      let askedPx = 0
+      let live = 1
+      const leads = predictors.map((predictor, index) => {
         predictor.pushFrame(frame)
         const lead = predictor.update({ nowMs: frame.nowMs, deltaMs })
         const moving = lead.live >= 1
+        if (index === 0) {
+          askedPx = Math.hypot(lead.x, lead.y)
+          live = lead.live
+        }
         return { x: moving ? lead.x * unit : 0, y: moving ? lead.y * unit : 0 }
       })
+
+      // A release is the one moment worth reading off a real device: the hand has stopped and the guess has
+      // not caught up yet, and every figure that decides how long that lasts — how old the samples were,
+      // how many arrived, how far apart — is a property of the machine rather than of the model. Recording
+      // is a ring write per frame; nothing reaches React until a release has finished playing out. Off
+      // unless asked for, so the rig a recording is pointed at is doing nothing but drawing markers.
+      if (measure) {
+        const spanMs = frame.sampleCount > 1 ? frame.sampleTimes[frame.sampleCount - 1]! - frame.sampleTimes[0]! : 0
+        history.push({
+          t: frame.nowMs,
+          dt: deltaMs,
+          age: frame.ageMs,
+          samples: frame.sampleCount,
+          span: spanMs,
+          stamp: frame.sampleCount > 0 ? frame.nowMs - frame.ageMs : 0,
+          moved: Math.hypot(frame.x, frame.y),
+          asked: askedPx,
+          drawn: Math.hypot(leads[0]!.x, leads[0]!.y) / unit,
+          live,
+        })
+        if (history.length > HISTORY_FRAMES) history.shift()
+
+        const isLive = live >= 1
+        if (isLive) runPeak = Math.max(runPeak, askedPx)
+        if (wasLive && !isLive) {
+          // Only worth keeping if the hand was actually going somewhere, or every twitch fires one.
+          if (runPeak >= MIN_CAPTURE_PX) tail = TAIL_FRAMES
+          runPeak = 0
+        }
+        wasLive = isLive
+        if (tail > 0) {
+          tail--
+        } else if (tail === 0) {
+          tail = -1
+          setCapture({ rows: history.slice(), dpr: devicePixelRatio })
+        }
+      }
 
       if (hasPosition) {
         // The cursor gives a true position to fall back on, so the whole lead is applied rather than only
@@ -243,7 +395,7 @@ const Rig = ({ compare, leadFrames, capPx, hideCursor, hideReported, hidePredict
       stopListening()
       window.removeEventListener('pointermove', onMove)
     }
-  }, [compare, leadFrames, capPx, hideReported, hidePredicted])
+  }, [compare, measure, leadFrames, capPx, hideReported, hidePredicted])
 
   return (
     <div className={`flex h-screen flex-col bg-neutral-900 text-sm text-white ${hideCursor ? 'cursor-none' : ''}`}>
@@ -290,6 +442,13 @@ const Rig = ({ compare, leadFrames, capPx, hideCursor, hideReported, hidePredict
           className={`rounded px-2 py-1 ${compare ? 'bg-emerald-600' : 'bg-white/15'}`}
         >
           compare leads
+        </button>
+
+        <button
+          onClick={() => setParam('measure', measure ? '0' : '1')}
+          className={`rounded px-2 py-1 ${measure ? 'bg-emerald-600' : 'bg-white/15'}`}
+        >
+          measure releases
         </button>
 
         <button
@@ -348,6 +507,22 @@ const Rig = ({ compare, leadFrames, capPx, hideCursor, hideReported, hidePredict
         thinks it will be by the time this frame reaches the screen. They should sit on top of each other when the hand
         is still, and the circle should sit on the OS cursor while it moves.
       </p>
+
+      {measure && capture && (
+        <div className="mx-2 mb-2 rounded bg-black/40">
+          <div className="flex items-center gap-2 px-2 py-1 text-xs text-white/50">
+            <span>Last release — frame 0 is the last one that carried motion</span>
+            <span className="ml-auto text-white/40">
+              press <kbd className="rounded bg-white/15 px-1 py-0.5 text-white/70">C</kbd> to copy,{' '}
+              <kbd className="rounded bg-white/15 px-1 py-0.5 text-white/70">X</kbd> to clear
+            </span>
+            {copied && <span className="rounded bg-emerald-600 px-2 py-0.5 text-white">copied</span>}
+          </div>
+          <pre className="overflow-x-auto px-2 pb-2 font-mono text-[11px] leading-tight text-white/70 tabular-nums">
+            {formatCapture(capture.rows, capture.dpr, leadFrames, capPx)}
+          </pre>
+        </div>
+      )}
 
       <div className="relative flex-1">
         <canvas ref={canvasRef} className="absolute inset-0 h-full w-full" />

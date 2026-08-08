@@ -59,6 +59,91 @@ describe('pointer prediction', () => {
     expect(last).toBe(0)
   })
 
+  test('a pause before a flick does not buy the flick a longer stop', () => {
+    // How long a device stays quiet while the hand is still moving has to be learned, because a mouse on a
+    // radio says nothing for twenty milliseconds at a time mid-flick and reading that as a stop makes the
+    // lead flicker. What is far too easy to learn by mistake is the hand sitting still: that silence looks
+    // exactly the same and is many times longer, and taken for a property of the device it says this one
+    // reports three times a second.
+    //
+    // Every pause the user makes then buys the flick after it that much longer before its stop is noticed,
+    // and the lead goes on growing over a hand that is already still — a quarter-second pause was worth
+    // 45px of travel the hand never made, and 23 frames of it. So the same flick has to end the same way
+    // however long the hand sat before it started.
+    const sail = (idleFrames: number) => {
+      predictor = createPointerPredictor()
+      now = 1000
+      // The shipped ramp and ceiling, not this file's shorter ones: how far a stop sails depends on both,
+      // so the figures below only mean anything against what the camera actually uses.
+      const shipped = { decay: DEFAULT_DECAY_MS, cap: DEFAULT_MAX_LEAD_PX }
+      for (let i = 0; i < idleFrames; i++) frame(0, shipped)
+
+      let atStop = 0
+      for (let i = 0; i < 8; i++) atStop = frame(42, shipped)
+
+      let grew = 0
+      let previous = atStop
+      let frames = 0
+      for (let i = 0; i < 40; i++) {
+        const lead = frame(0, shipped)
+        grew += Math.max(0, lead - previous)
+        previous = lead
+        if (Math.abs(lead) > Math.abs(atStop) * 0.1) frames = i + 1
+      }
+      return { grew, frames }
+    }
+
+    const unpaused = sail(0)
+    // A flick straight off a standing start barely sails at all, and is done inside a tenth of a second.
+    expect(unpaused.grew).toBeLessThan(6)
+    expect(unpaused.frames).toBeLessThan(7)
+
+    // And no amount of sitting still first changes that.
+    for (const idleFrames of [3, 10, 30, 90]) {
+      const paused = sail(idleFrames)
+      expect(paused.grew).toBeLessThanOrEqual(unpaused.grew + 0.5)
+      expect(paused.frames).toBeLessThanOrEqual(unpaused.frames)
+    }
+  })
+
+  test('a frame that carries no samples at all does not grow the guess', () => {
+    // Measured on a trackpad, which hands over exactly one coalesced sample per frame — so the window
+    // behind the fit is three points wide and every frame is either all of the motion or none of it. The
+    // travel below is what that device actually reported into a fast flick, in pixels per frame.
+    //
+    // When the hand came off the pad, the very next frame carried no samples and no motion, and the lead
+    // still grew from 47 to 56px on it: a fifth of the guess invented by a frame that learned nothing. It
+    // is also the only frame the eye gets, because the one after it is already being discounted — so this
+    // single frame was the whole visible artefact.
+    //
+    // Freshness cannot catch it. It does not begin to fade until a full frame of silence has passed, and
+    // one frame is all it takes.
+    // One sample a frame rather than the sixteen `frame` feeds, which is the whole point of this case.
+    const step = (movedPx: number) => {
+      if (movedPx > 0) predictor.push(now - AGE, movedPx, 0)
+      const lead = predictor.update({
+        nowMs: now,
+        deltaMs: FRAME,
+        leadFrames: LEAD_FRAMES,
+        decayMs: DEFAULT_DECAY_MS,
+        maxLeadPx: DEFAULT_MAX_LEAD_PX,
+      })
+      now += FRAME
+      return lead
+    }
+
+    let moving = 0
+    for (const movedPx of [9, 61, 116, 283, 317]) moving = step(movedPx).x
+    expect(moving).toBeGreaterThan(20)
+
+    // It may hold what it has, and it may fade. It may not go further out on nothing at all.
+    const silent = step(0)
+    expect(silent.x).toBeLessThanOrEqual(moving)
+    // And it must still be live: dropping the guess outright on one empty frame is what a device that
+    // leaves a third of its frames empty while moving cannot survive.
+    expect(silent.live).toBeGreaterThan(0)
+  })
+
   test('the fit reads the deceleration, so the lead is coming down before the hand stops', () => {
     // A flick that eases out, at frame resolution. This is the whole reason for fitting a curve rather
     // than smoothing a velocity: an estimator that cannot see a stop coming is still at about 90% of its
@@ -467,6 +552,7 @@ describe('pointer prediction quality floor', () => {
     let appliedY = 0
     let worstStep = 0
     let worstLead = 0
+    let worstOvershoot = 0
     let radialSum = 0
     let withSum = 0
     let withoutSum = 0
@@ -516,6 +602,21 @@ describe('pointer prediction quality floor', () => {
       if (frameAt > 600) {
         if (previous) worstStep = Math.max(worstStep, Math.hypot(lead.x - previous.x, lead.y - previous.y))
         const truth = path(frameAt + PRESENT_FRAMES * FRAME)
+
+        // How far past the hand the guess sits, along the way the hand is going. Overshooting and falling
+        // short are not the same error and are not worth scoring as one: lead that was never there has to
+        // be handed back, and handing it back is a reversal on screen, where falling short is only the
+        // lateness this whole thing exists to remove.
+        const ahead = path(frameAt + PRESENT_FRAMES * FRAME + 1)
+        const behind = path(frameAt + PRESENT_FRAMES * FRAME - 1)
+        const towardsX = ahead.x - behind.x
+        const towardsY = ahead.y - behind.y
+        const towards = Math.hypot(towardsX, towardsY)
+        if (towards > 1e-9) {
+          const past =
+            ((integratedX + lead.x - truth.x) * towardsX + (integratedY + lead.y - truth.y) * towardsY) / towards
+          worstOvershoot = Math.max(worstOvershoot, past)
+        }
         withSum += (integratedX + lead.x - truth.x) ** 2 + (integratedY + lead.y - truth.y) ** 2
         withoutSum += (integratedX - truth.x) ** 2 + (integratedY - truth.y) ** 2
         radialSum += Math.hypot(integratedX + lead.x, integratedY + lead.y)
@@ -532,6 +633,7 @@ describe('pointer prediction quality floor', () => {
       meanRadius: radialSum / Math.max(1, scored),
       kept: Math.hypot(keptX, keptY),
       worstLead,
+      worstOvershoot,
     }
   }
 
@@ -547,6 +649,19 @@ describe('pointer prediction quality floor', () => {
     x: r * Math.cos((2 * Math.PI * t) / periodMs),
     y: r * Math.sin((2 * Math.PI * t) / periodMs),
   })
+  // A hand that throws the view somewhere and lets go: a cruise, then a cosine ease down to a dead stop
+  // over fallMs. The stop is the whole point — it is the one moment the guess is asked to give back
+  // everything it is holding, and the moment it is furthest from being able to see it coming.
+  const flick = (speed: number, angleDeg: number, cruiseMs: number, fallMs: number) => {
+    const ux = Math.cos((angleDeg * Math.PI) / 180)
+    const uy = Math.sin((angleDeg * Math.PI) / 180)
+    const travelled = (t: number) => {
+      if (t <= cruiseMs) return speed * t
+      const u = Math.min(t - cruiseMs, fallMs)
+      return speed * (cruiseMs + u / 2 + (fallMs / (2 * Math.PI)) * Math.sin((Math.PI * u) / fallMs))
+    }
+    return (t: number) => ({ x: ux * travelled(t), y: uy * travelled(t) })
+  }
 
   // A diagonal is the hard case for steadiness: the two axes cross their whole-count boundaries at
   // different moments, so the path the fit sees zig-zags about the true line.
@@ -738,10 +853,11 @@ describe('pointer prediction quality floor', () => {
       [10, 12],
     ] as const) {
       const { worstLead, error, errorWithout } = replay(shake(amplitude, hz), WIRED, 2500)
-      // Never further out than the motion itself is wide.
-      expect(worstLead).toBeLessThan(amplitude * 0.6)
+      // Never further out than the motion itself is wide. A shake is a stop twice a cycle, so reading the
+      // braking sooner pulled both of these in and they were tightened to match.
+      expect(worstLead).toBeLessThan(amplitude * 0.55)
       // And guessing must not be worse than not guessing by more than a little.
-      expect(error).toBeLessThan(errorWithout * 1.3)
+      expect(error).toBeLessThan(errorWithout * 1.15)
     }
   })
 
@@ -759,6 +875,34 @@ describe('pointer prediction quality floor', () => {
       const { meanRadius } = replay(circle(r, periodMs), WIRED, 3000)
       expect(meanRadius - r).toBeLessThan(tolerance)
       expect(meanRadius - r).toBeGreaterThan(-tolerance)
+    }
+  })
+
+  test('a flick that eases out is not led past where the hand stops', () => {
+    // The stop is where a guess is most exposed. The hand gives up all its speed in about a tenth of a
+    // second, and every reading that could see it coming — the curvature, the trend in the fitted speed,
+    // the target's own slope — only exists once the stopping is already under way. Lead still being held
+    // by then has to be handed back, and handing it back walks the view backwards under the hand, which
+    // is the one error a camera cannot hide.
+    //
+    // Scored along the way the hand is going and only where the guess is ahead of it, so this is overshoot
+    // by itself rather than the ordinary lateness rolled in with it. An 80ms fall is a hand snapping to a
+    // halt; 250ms is letting go of a long drag. The slower the device reports, the later it can possibly
+    // know, so each is held to its own figure.
+    const limits = [
+      [WIRED, 26, 12, 6],
+      [TRACKPAD, 44, 24, 18],
+      [BLUETOOTH, 53, 35, 33],
+      [SLOW_RADIO, 57, 45, 40],
+    ] as const
+    for (const [device, ...allowed] of limits) {
+      const falls = [80, 150, 250] as const
+      falls.forEach((fallMs, i) => {
+        const { worstOvershoot, error, errorWithout } = replay(flick(2.6, 20, 800, fallMs), device, 800 + fallMs + 300)
+        expect(worstOvershoot).toBeLessThan(allowed[i]!)
+        // And none of that may be bought by simply not guessing, which would score perfectly here.
+        expect(error).toBeLessThan(errorWithout * 0.45)
+      })
     }
   })
 

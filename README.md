@@ -213,6 +213,23 @@ So the extrapolation follows an **arc**, not a straight line. Speed and heading 
 rate is measured off the path as two chords, because over a wide arc a parabola fits the curvature badly.
 The arc degenerates to the straight line as the turn rate goes to zero, so straight motion is bit-identical.
 
+**Braking is believed sooner than the rest of the fit, and read two ways.** Lead that turns out not to have
+been needed has to be handed back, and handing it back walks the view backwards under the hand; lead that was
+never taken is only the lateness the library exists to remove. So the two are not held to the same standard —
+evidence that the hand is slowing is acted on as it arrives, evidence that it is speeding up goes on being
+settled slowly. The two readings are the curvature within the window, and the fitted speed changing across
+frames: the first is a second derivative over a 40ms span and dies on a device reporting four times per
+window, the second differences first derivatives over several frames and still reads that hand at four times
+its own noise. Whichever brakes harder wins, so a thick window is unaffected and a thin one gets a stop it
+would otherwise never have seen.
+
+**Most of the overshoot was never in the fit — it was the ramp behind it.** A first-order lag trails its
+target by its own time constant times how fast that target is moving, and coming off a flick the target falls
+faster than at any other time. That lag is a known quantity rather than something to be differentiated out of
+a noisy signal, so it is subtracted outright instead of being filtered away, and the smoothing a shaky device
+depends on is kept whole. On a hand at constant speed there is nothing to subtract and the guess is
+unchanged, bit for bit.
+
 The rest is mostly about not believing noise:
 
 - **Below a crawl there is no lead at all.** Whole mouse counts are all a slow hand produces, and a fit over
@@ -223,7 +240,14 @@ The rest is mostly about not believing noise:
   mouse at the start of a flick looks as thin as a slow device, which is exactly when the bend matters most.
 - **Device quiet is tolerated before it counts as stopping.** A wired mouse reports every millisecond; one on
   a radio reports in bursts and can say nothing for twenty. Reading that as a stop flickered the lead
-  four-fold on a Bluetooth mouse while the hand moved perfectly steadily.
+  four-fold on a Bluetooth mouse while the hand moved perfectly steadily. What that quiet is gets learned per
+  device — but only from silences the hand was moving through. A silence long enough to have been judged a
+  stop teaches nothing, or every pause the user makes buys the flick after it a longer one: a quarter-second
+  pause was worth 45px of travel the hand never made, and 23 frames of it.
+- **A frame that learns nothing does not become bolder.** Once the silence runs past what this device is
+  known to keep, the guess may hold and it may fade, but it may not grow. A trackpad hands over one coalesced
+  sample per frame, so the frame after the hand lifts carries no samples and no motion at all — and the lead
+  grew a fifth on it, which is the one frame the eye gets before freshness starts discounting it.
 - **A hitch is not a change of refresh interval**, and the age of the newest sample is averaged rather than
   taken raw — a few milliseconds of horizon is pixels of lead on a hand doing nothing new.
 - **The guess is never led past its own reversal.** A quick shake turns round before the horizon is out, and
