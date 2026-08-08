@@ -1,0 +1,11 @@
+# `bun i` runs inside the image, so anything the host built would only be copied
+# over the top of it by the `COPY . .` that follows.
+node_modules
+dist
+out
+.next
+*.tsbuildinfo
+
+.git
+.github
+.husky

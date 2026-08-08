@@ -1,0 +1,41 @@
+{
+  "name": "hyperpointer",
+  "version": "0.0.1",
+  "description": "Draws the camera where the hand will be, not where it was: pointer input collection and motion prediction for real-time browser games.",
+  "keywords": [
+    "camera",
+    "game",
+    "input",
+    "latency",
+    "mouse",
+    "pointer",
+    "pointer-lock",
+    "prediction"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/verekia/hyperpointer.git"
+  },
+  "files": [
+    "dist"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "dev": "tsup --watch",
+    "build": "tsup && cp ../README.md README.md",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "1.3.8",
+    "tsup": "8.5.1",
+    "typescript": "6.0.3"
+  }
+}
