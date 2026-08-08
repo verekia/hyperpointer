@@ -1,6 +1,6 @@
 {
   "name": "hyperpointer",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Draws the camera where the hand will be, not where it was: pointer input collection and motion prediction for real-time browser games.",
   "keywords": [
     "camera",
