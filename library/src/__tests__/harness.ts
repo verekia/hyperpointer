@@ -739,7 +739,11 @@ export const SCENARIOS: readonly Scenario[] = [
   scenario(
     'ramp up',
     'constant acceleration from rest: the half of a movement a velocity estimator is late on',
-    piecewise([hold(300), accelerate(0.0025, 25, 1200), glide(3, 25, 600)]),
+    // The glide runs past the end of the run on purpose: this scenario is asking about the acceleration, and
+    // a path that stops where the run stops is a hand stopping dead on the last frame. Scored, that stop was
+    // the worst jump in the whole scenario on every device — 45px of picture against a hand that had not
+    // moved — and it was measuring the rig running out of path rather than anything the guess did.
+    piecewise([hold(300), accelerate(0.0025, 25, 1200), glide(3, 25, 800)]),
     2100,
     400,
   ),
@@ -759,7 +763,7 @@ export const SCENARIOS: readonly Scenario[] = [
   scenario(
     'abrupt start',
     'nothing to full speed between two samples: the guess has to arrive without inventing motion first',
-    piecewise([hold(500), glide(2, 40, 900)]),
+    piecewise([hold(500), glide(2, 40, 1000)]),
     1400,
     520,
   ),

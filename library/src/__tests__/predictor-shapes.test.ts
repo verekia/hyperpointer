@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import { circle, DEVICES, replay, SCENARIOS, WIRED, worstAcross, type Metrics } from './harness.js'
+import { circle, DEVICES, FRAME, replay, SCENARIOS, WIRED, worstAcross, type Metrics } from './harness.js'
 
 // Every shape a hand makes, scored on every device, against a floor that was measured rather than hoped for.
 //
@@ -100,7 +100,11 @@ const LIMITS: Record<string, Limits> = {
     jump: 90,
     kept: 150,
   },
-  'ramp up': { gain: 0.4, size: 4, over: 45, late: 85, kick: 0, back: 0, still: 0, lead: 150, jump: 85, kept: 150 },
+  // `jump` here used to be the rig running out of path rather than anything the guess did — the hand stopped
+  // dead on the last frame and the picture carried 45px past it. With the glide carried on past the run, what
+  // is left is a device delivering nothing for a frame while the hand crosses 50px of pad, which is the
+  // bursty devices and not the fit: the wired mouse has no frame over 25px in the whole scenario.
+  'ramp up': { gain: 0.4, size: 4, over: 45, late: 85, kick: 0, back: 0, still: 0, lead: 150, jump: 62, kept: 150 },
 
   // Stops. The one moment the guess is asked to give everything back, and the moment it is furthest from
   // being able to see it coming — `still` is what that costs on screen.
@@ -149,7 +153,8 @@ const LIMITS: Record<string, Limits> = {
     back: 0,
     still: 0,
     lead: 75,
-    jump: 60,
+    // The same: what remains is a burst device silent for a frame, not the guess moving unevenly.
+    jump: 47,
     kept: 95,
   },
   'stop and go': {
@@ -429,6 +434,30 @@ const LIMITS: Record<string, Limits> = {
 }
 
 describe('movement shapes', () => {
+  test('a scenario still moving at the end of its run has path left to move along', () => {
+    // `piecewise` holds its last position for ever after, which is what a hand that has stopped does — so a
+    // path whose segments run out exactly where the run ends reads as a hand stopping dead on the final
+    // frame. Nothing about that stop is the scenario's question, and the frames scoring it are the loudest in
+    // the run: `ramp up` is asking about an acceleration and its worst jump on every device was the rig
+    // running out of path, 45px of picture against a hand that had not moved. Two scenarios were doing it,
+    // and neither was scoring the thing it was written to score.
+    for (const scenario of SCENARIOS) {
+      const end = scenario.durationMs
+      const before = scenario.path(end - 40)
+      const at = scenario.path(end)
+      const after = scenario.path(end + 2 * FRAME)
+      const speedBefore = Math.hypot(at.x - before.x, at.y - before.y) / 40
+      const speedAfter = Math.hypot(after.x - at.x, after.y - at.y) / (2 * FRAME)
+      // A hand that is genuinely still at the end is fine — it is one still moving into the last frame and
+      // frozen past it that means the path, rather than the hand, ran out.
+      if (speedBefore > 0.05) {
+        expect(`${scenario.name}: ${speedAfter.toFixed(3)}px/ms after the run`).toBe(
+          `${scenario.name}: ${Math.max(speedAfter, speedBefore * 0.2).toFixed(3)}px/ms after the run`,
+        )
+      }
+    }
+  })
+
   test('every scenario has a floor and every floor has a scenario', () => {
     // A shape added to the rig with nothing holding it is a shape nobody is watching, and a floor left
     // behind by a renamed scenario is a number that can never fail.
