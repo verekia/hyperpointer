@@ -264,6 +264,12 @@ The rest is mostly about not believing noise:
   grew a fifth on it, which is the one frame the eye gets before freshness starts discounting it.
 - **A hitch is not a change of refresh interval**, and the age of the newest sample is averaged rather than
   taken raw — a few milliseconds of horizon is pixels of lead on a hand doing nothing new.
+- **Nor further ahead than the path turns a quarter circle over.** Past that the answer is mostly the turn
+  rate — the noisiest thing in the fit — and the chord being asked for has stopped growing with the horizon
+  and started coming back towards the hand, so a wobble in the rate moves the guess around the circle rather
+  than along it. Unbounded, a hand stirring a small circle came apart as `leadFrames` went up: at three
+  refreshes of lead the guess sat 58px off a 25px circle. Bounded, it reads the same at one refresh and at
+  four.
 - **The guess is never led past its own reversal.** A quick shake turns round before the horizon is out, and
   at the moment it is fastest there is no acceleration to give the turn away.
 

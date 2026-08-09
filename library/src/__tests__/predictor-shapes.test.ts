@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import { DEVICES, replay, SCENARIOS, worstAcross, type Metrics } from './harness.js'
+import { circle, DEVICES, replay, SCENARIOS, WIRED, worstAcross, type Metrics } from './harness.js'
 
 // Every shape a hand makes, scored on every device, against a floor that was measured rather than hoped for.
 //
@@ -51,8 +51,8 @@ const LIMITS: Record<string, Limits> = {
   crawl: { gain: 1.06, size: 0, over: 0, late: 5.5, kick: 0, back: 0, still: 0, lead: 0, jump: 1.5 },
   'steady on-axis': { gain: 0.35, size: 0.8, over: 15, late: 25, kick: 0, back: 0, still: 0, lead: 30, jump: 20 },
   // Far past the cap, so what is being judged is that the ceiling holds and nothing rings against it.
-  whip: { gain: 0.44, size: 0.7, over: 35, late: 150, kick: 0.01, back: 0.01, still: 0, lead: 101, jump: 90 },
-  'ramp up': { gain: 0.4, size: 4, over: 45, late: 85, kick: 0, back: 0, still: 0, lead: 101, jump: 85 },
+  whip: { gain: 0.44, size: 0.7, over: 35, late: 150, kick: 0.01, back: 0.01, still: 0, lead: 150, jump: 90 },
+  'ramp up': { gain: 0.4, size: 4, over: 45, late: 85, kick: 0, back: 0, still: 0, lead: 150, jump: 85 },
 
   // Stops. The one moment the guess is asked to give everything back, and the moment it is furthest from
   // being able to see it coming — `still` is what that costs on screen.
@@ -102,28 +102,28 @@ const LIMITS: Record<string, Limits> = {
     jump: 60,
   },
   'rounded corner': { gain: 0.47, size: 2, over: 20, late: 50, kick: 0, back: 0, still: 0, lead: 45, jump: 30 },
-  circle: { gain: 0.33, size: 8.5, over: 30, late: 50, kick: 0, back: 0, still: 0, lead: 75, jump: 50 },
+  circle: { gain: 0.34, size: 7.5, over: 25, late: 50, kick: 0, back: 0, still: 0, lead: 70, jump: 50 },
   'circle, tight and fast': {
-    gain: 0.32,
-    size: 7.5,
-    over: 25,
-    late: 30,
-    kick: 0.4,
-    back: 0.4,
+    gain: 0.39,
+    size: 5,
+    over: 20,
+    late: 35,
+    kick: 0.75,
+    back: 0.75,
     still: 0,
-    lead: 60,
+    lead: 55,
     jump: 45,
   },
   // A stir: small and quick enough that a whole horizon of it sweeps past a right angle, which is where the
   // arc has to stop being believed rather than wrap round.
-  stir: { gain: 0.94, size: 15, over: 15, late: 40, kick: 0, back: 0, still: 0, lead: 50, jump: 35 },
+  stir: { gain: 0.95, size: 15, over: 0, late: 40, kick: 0, back: 0, still: 0, lead: 35, jump: 30 },
   // The same circle with a hand on it, so the quantisation error stops being a function of the angle and
   // starts being noise. It scores like the clean one, which is what says the clean one is not being flattered
   // by its own regularity.
-  'circle, hand-drawn': { gain: 0.34, size: 10, over: 25, late: 50, kick: 0, back: 0, still: 0, lead: 75, jump: 50 },
-  'circle, reversed': { gain: 0.33, size: 8.5, over: 30, late: 50, kick: 0, back: 0, still: 0, lead: 75, jump: 50 },
+  'circle, hand-drawn': { gain: 0.35, size: 9, over: 25, late: 50, kick: 0, back: 0, still: 0, lead: 75, jump: 50 },
+  'circle, reversed': { gain: 0.34, size: 7.5, over: 25, late: 50, kick: 0, back: 0, still: 0, lead: 70, jump: 50 },
   'figure eight': { gain: 0.86, size: 7.5, over: 15, late: 65, kick: 2.5, back: 3.5, still: 0, lead: 50, jump: 35 },
-  spiral: { gain: 0.58, size: 8.5, over: 30, late: 75, kick: 0, back: 0, still: 0, lead: 95, jump: 60 },
+  spiral: { gain: 0.58, size: 8, over: 30, late: 75, kick: 0, back: 0, still: 0, lead: 95, jump: 60 },
   serpentine: { gain: 0.69, size: 3.5, over: 15, late: 45, kick: 0, back: 0, still: 0, lead: 30, jump: 25 },
   // A turn slow enough and wide enough that the angle between the window's two halves barely clears what
   // quantisation alone produces. Believing it too readily and not at all are both visible here.
@@ -142,7 +142,7 @@ const LIMITS: Record<string, Limits> = {
     kick: 25,
     back: 350,
     still: 55,
-    lead: 6.5,
+    lead: 5.5,
     jump: 25,
   },
   'overshoot and correct': {
@@ -217,6 +217,84 @@ describe('movement shapes', () => {
         },
       })
       expect(frames).toBeGreaterThan(10)
+    }
+  })
+})
+
+describe('raising the lead does not throw a small circle apart', () => {
+  // A hand stirring a small circle quickly is the one shape where a whole horizon is most of a lap, and it
+  // used to come apart as `leadFrames` went up: at three refreshes of lead the guess sat 58px off a 25px
+  // circle — two diameters from anywhere the hand ever goes — and moved 60px in a frame getting there. Every
+  // extra refresh cost more than the last, which is the shape of a guess being extrapolated past the point
+  // anything about it is still true.
+  //
+  // The horizon is bounded by how far the path turns over it now, so the answer stops growing with the
+  // setting instead: what a longer lead cannot buy, it no longer spends. Each row is the worst reading
+  // across the four devices, and the figures hold at one refresh of lead and at four alike.
+  const CIRCLES = [
+    { r: 25, periodMs: 110, off: 10, jump: 24 },
+    { r: 15, periodMs: 150, off: 3, jump: 15 },
+    { r: 25, periodMs: 200, off: 3.5, jump: 19 },
+  ]
+
+  for (const { r, periodMs, off, jump } of CIRCLES) {
+    test(`a ${r}px circle every ${periodMs}ms stays on the circle at any lead`, () => {
+      for (const leadFrames of [1, 2, 3, 4]) {
+        const run = worstAcross(DEVICES, { path: circle(r, periodMs), durationMs: 3000, leadFrames })
+        expect(Math.abs(run.meanRadius - r)).toBeLessThan(off)
+        expect(run.worstJump).toBeLessThan(jump)
+      }
+    })
+  }
+
+  test('and the lead setting barely moves any of it', () => {
+    // The figures above would pass on a guess that was equally bad at every setting. This is the part that
+    // says the setting stopped mattering: four refreshes of lead may not be meaningfully worse than one.
+    for (const { r, periodMs } of CIRCLES) {
+      const one = worstAcross(DEVICES, { path: circle(r, periodMs), durationMs: 3000, leadFrames: 1 })
+      const four = worstAcross(DEVICES, { path: circle(r, periodMs), durationMs: 3000, leadFrames: 4 })
+      expect(Math.abs(four.meanRadius - r)).toBeLessThan(Math.abs(one.meanRadius - r) + 1.5)
+      expect(four.worstJump).toBeLessThan(one.worstJump * 1.15 + 1)
+    }
+  })
+
+  test('a circle a hand actually draws is untouched by the bound', () => {
+    // The bound is on the turn, not on turning. A wide circle turns a fraction of a right angle over one
+    // horizon, so it never reaches the bound and keeps every pixel of lead the setting asks for — the lead
+    // has to go on growing with `leadFrames`, or this has quietly become a cap on how far anything is led.
+    for (const [r, periodMs] of [
+      [60, 400],
+      [200, 900],
+    ] as const) {
+      const leads = [1, 2, 4].map(
+        leadFrames => replay({ path: circle(r, periodMs), device: WIRED, durationMs: 3000, leadFrames }).meanLead,
+      )
+      expect(leads[1]!).toBeGreaterThan(leads[0]! * 1.4)
+      expect(leads[2]!).toBeGreaterThan(leads[1]! * 1.25)
+      // And it stays on the circle while doing it.
+      for (const leadFrames of [1, 2, 4]) {
+        const run = replay({ path: circle(r, periodMs), device: WIRED, durationMs: 3000, leadFrames })
+        expect(Math.abs(run.meanRadius - r)).toBeLessThan(8)
+      }
+    }
+  })
+
+  test('a wide circle on a device that reports slowly still drifts outside it', () => {
+    // **Known, unfixed, and a different mechanism.** The bound above is on how far the path turns over the
+    // horizon, and a wide circle never turns far enough to reach it. What puts the guess outside one of
+    // those is the turn being believed less than it is: on a window holding four or five samples the two
+    // chords it is read from are short, the quantisation floor they are judged against is correspondingly
+    // large, and an under-believed turn bends the arc less than the path bends, which leaves along the
+    // tangent. A wired mouse on the same circle sits within 6px of it at four refreshes of lead.
+    //
+    // Fixing it means believing a turn on thinner evidence, which is the same knob that decides whether a
+    // slow drag shakes — a different change with a different blast radius. These are the numbers it would
+    // have to beat.
+    const DRIFT: Record<string, number> = { trackpad: 34, bluetooth: 24, 'slow radio': 39 }
+    for (const device of DEVICES) {
+      const run = replay({ path: circle(60, 400), device, durationMs: 3000, leadFrames: 4 })
+      const allowed = DRIFT[device.name] ?? 3
+      expect(run.meanRadius - 60).toBeLessThan(allowed)
     }
   })
 })
