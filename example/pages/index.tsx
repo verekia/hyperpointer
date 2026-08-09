@@ -39,6 +39,9 @@ type Settings = {
   raw: boolean
   leadFrames: number
   capPx: number
+  /** How hard the lead is smoothed. The one setting that moves what people report as stutter, and a matter
+   * of taste rather than of measurement — so it belongs on the rig next to the others, judged by eye. */
+  decayMs: number
   hideCursor: boolean
   hideReported: boolean
   hidePredicted: boolean
@@ -170,6 +173,7 @@ const readSettings = (): Settings => {
     // millisecond value cannot ask for half a second of lead.
     leadFrames: Math.min(Math.max(numberParam(params, 'lead', DEFAULT_LEAD_FRAMES), 0), 8),
     capPx: Math.abs(numberParam(params, 'cap', DEFAULT_MAX_LEAD_PX)),
+    decayMs: Math.min(Math.max(numberParam(params, 'decay', DEFAULT_DECAY_MS), 1), 400),
     compare: params.get('compare') === '1',
     measure: params.get('measure') === '1',
     raw: params.get('raw') === '1',
@@ -185,7 +189,17 @@ const setParam = (key: string, value: string) => {
   window.location.search = params.toString()
 }
 
-const Rig = ({ compare, measure, raw, leadFrames, capPx, hideCursor, hideReported, hidePredicted }: Settings) => {
+const Rig = ({
+  compare,
+  measure,
+  raw,
+  leadFrames,
+  capPx,
+  decayMs,
+  hideCursor,
+  hideReported,
+  hidePredicted,
+}: Settings) => {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const [capping, setCapping] = useState(false)
   const [readout, setReadout] = useState<string[]>([])
@@ -311,9 +325,7 @@ const Rig = ({ compare, measure, raw, leadFrames, capPx, hideCursor, hideReporte
     // not, which is the whole reason for the differing radii.
     const buffer = createPointerBuffer()
     const shownLeads = compare ? COMPARE_LEADS : [leadFrames]
-    const predictors = shownLeads.map(lead =>
-      createPointerPredictor({ leadFrames: lead, maxLeadPx: capPx, decayMs: DEFAULT_DECAY_MS }),
-    )
+    const predictors = shownLeads.map(lead => createPointerPredictor({ leadFrames: lead, maxLeadPx: capPx, decayMs }))
     const stopListening = buffer.listen()
 
     // The rig needs the true cursor position as well as the motion, which is the one thing a delta source
@@ -468,7 +480,7 @@ const Rig = ({ compare, measure, raw, leadFrames, capPx, hideCursor, hideReporte
       stopListening()
       window.removeEventListener('pointermove', onMove)
     }
-  }, [compare, measure, leadFrames, capPx, hideReported, hidePredicted])
+  }, [compare, measure, raw, leadFrames, capPx, decayMs, hideReported, hidePredicted])
 
   return (
     <div
@@ -500,6 +512,19 @@ const Rig = ({ compare, measure, raw, leadFrames, capPx, hideCursor, hideReporte
             </button>
           ))}
           <span className="text-white/50">px cap</span>
+        </span>
+
+        <span className="flex items-center gap-1">
+          {[15, 30, 60, 100].map(ms => (
+            <button
+              key={ms}
+              onClick={() => setParam('decay', String(ms))}
+              className={`rounded px-2 py-1 ${decayMs === ms ? 'bg-emerald-600' : 'bg-white/15'}`}
+            >
+              {ms}
+            </button>
+          ))}
+          <span className="text-white/50">ms decay</span>
         </span>
 
         <span
