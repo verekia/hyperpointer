@@ -33,6 +33,10 @@ type Settings = {
   /** The release capture below. Off by default: it exists to read numbers off a real device when something
    * is in question, and the rig's ordinary job is to be looked at rather than read. */
   measure: boolean
+  /** Every sample the predictor is fed, logged verbatim so a real device can be replayed through the rig.
+   * The summary capture above says what the guess did; this says what it was given, which is the only thing
+   * that can answer a question about the device rather than about the fit. */
+  raw: boolean
   leadFrames: number
   capPx: number
   hideCursor: boolean
@@ -40,6 +44,8 @@ type Settings = {
   hidePredicted: boolean
 }
 
+// About twenty seconds of a fast mouse, which is far more hand than anyone moves in one go.
+const RAW_SAMPLES = 20000
 const CAP_INDICATOR_HOLD_MS = 400
 // One frame of the capture below. Everything is in CSS pixels and milliseconds, as the browser reported
 // them, so a pasted capture can be read without knowing anything about this page.
@@ -166,6 +172,7 @@ const readSettings = (): Settings => {
     capPx: Math.abs(numberParam(params, 'cap', DEFAULT_MAX_LEAD_PX)),
     compare: params.get('compare') === '1',
     measure: params.get('measure') === '1',
+    raw: params.get('raw') === '1',
     hideCursor: params.get('nocursor') === '1',
     hideReported: params.get('noreported') === '1',
     hidePredicted: params.get('nopredicted') === '1',
@@ -178,12 +185,41 @@ const setParam = (key: string, value: string) => {
   window.location.search = params.toString()
 }
 
-const Rig = ({ compare, measure, leadFrames, capPx, hideCursor, hideReported, hidePredicted }: Settings) => {
+const Rig = ({ compare, measure, raw, leadFrames, capPx, hideCursor, hideReported, hidePredicted }: Settings) => {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const [capping, setCapping] = useState(false)
   const [readout, setReadout] = useState<string[]>([])
   const [capture, setCapture] = useState<{ rows: CaptureRow[]; dpr: number } | null>(null)
   const [copied, setCopied] = useState(false)
+  // Every sample handed to the predictor, kept in order. A ring rather than a growing list: this runs for as
+  // long as the page is open and the last few seconds are the only ones anybody wants.
+  const rawLog = useRef<{ t: number; dx: number; dy: number }[]>([])
+  const [rawCopied, setRawCopied] = useState(false)
+  const [rawSamples, setRawSamples] = useState(0)
+
+  useEffect(() => {
+    if (!raw) return
+    const onKey = (event: KeyboardEvent) => {
+      if (event.metaKey || event.ctrlKey || event.altKey) return
+      const key = event.key.toLowerCase()
+      if (key === 'r') {
+        const rows = rawLog.current
+        const head = [
+          `hyperpointer raw — ${rows.length} samples, dpr=${devicePixelRatio}, ua=${navigator.userAgent}`,
+          'timeStampMs deltaX deltaY',
+        ]
+        navigator.clipboard?.writeText([...head, ...rows.map(r => `${r.t.toFixed(3)} ${r.dx} ${r.dy}`)].join('\n'))
+        setRawCopied(true)
+        window.setTimeout(() => setRawCopied(false), 1200)
+      }
+      if (key === 'x') {
+        rawLog.current = []
+        setRawSamples(0)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [raw])
 
   // C copies, X clears. Reaching for the button is not an option: the pointer has to cross the window to
   // get there, which is another flick and another release, and the capture being reached for is overwritten
@@ -303,6 +339,7 @@ const Rig = ({ compare, measure, leadFrames, capPx, hideCursor, hideReported, hi
 
     let raf = 0
     let lastReadout = 0
+    let lastRawCount = 0
     let lastFrameAt = performance.now()
     // Held briefly so the indicator reads as a light coming on rather than a flicker.
     let lastCappedAt = 0
@@ -311,6 +348,17 @@ const Rig = ({ compare, measure, leadFrames, capPx, hideCursor, hideReported, hi
       raf = requestAnimationFrame(draw)
 
       const frame = buffer.read()
+      if (raw) {
+        const log = rawLog.current
+        for (let i = 0; i < frame.sampleCount; i++) {
+          log.push({ t: frame.sampleTimes[i]!, dx: frame.sampleX[i]!, dy: frame.sampleY[i]! })
+        }
+        if (log.length > RAW_SAMPLES) log.splice(0, log.length - RAW_SAMPLES)
+        if (frame.sampleCount > 0 && frame.nowMs - lastRawCount > 250) {
+          lastRawCount = frame.nowMs
+          setRawSamples(log.length)
+        }
+      }
       const deltaMs = frame.nowMs - lastFrameAt
       lastFrameAt = frame.nowMs
 
@@ -538,6 +586,16 @@ const Rig = ({ compare, measure, leadFrames, capPx, hideCursor, hideReported, hi
         around the dot while it moves.
       </p>
 
+      {raw && (
+        <div className="mx-2 mb-2 flex items-center gap-2 rounded bg-black/40 px-2 py-1 text-xs text-white/50">
+          <span>Raw samples: {rawSamples}</span>
+          <span className="ml-auto text-white/40">
+            move the hand, then press <kbd className="rounded bg-white/15 px-1 py-0.5 text-white/70">R</kbd> to copy,{' '}
+            <kbd className="rounded bg-white/15 px-1 py-0.5 text-white/70">X</kbd> to clear
+          </span>
+          {rawCopied && <span className="rounded bg-emerald-600 px-2 py-0.5 text-white">copied</span>}
+        </div>
+      )}
       {measure && capture && (
         <div className="mx-2 mb-2 rounded bg-black/40">
           <div className="flex items-center gap-2 px-2 py-1 text-xs text-white/50">
