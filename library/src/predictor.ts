@@ -56,6 +56,34 @@
 // Freshness is the only stop signal once the hand has already stopped. A stopped pointer sends nothing, so
 // the lead fades out over STOP_MS rather than sailing on at the last fitted speed.
 //
+// **A hand doubling back is a different event from a hand going round, and telling them apart is the heading
+// the last one is remembered as.** Guessing past a reversal is guessing at a path the samples cannot show, so
+// how long this hand has been going one way bounds how far ahead it is read — which makes that memory load
+// bearing, and it was wrong in both directions at once.
+//
+// It lagged, so a turn read as a reversal. The memory covers twenty-five milliseconds and a hand stirring a
+// small circle turns eighty degrees in that time, so the heading it was judged against was eighty degrees
+// stale before any noise arrived and the last ten came free — a hand going steadily round therefore turned
+// back several times a lap, and the interval between those readings bounded the horizon. It is carried round
+// by the turn the path is already believed to be making now, the same rotation the eased lead itself is
+// carried by, so only a hand that genuinely leaves the arc reverses. A path that is not turning is carried by
+// nothing, and straight motion is untouched.
+//
+// And it lingered, so one reversal was counted as two. Eased towards the new heading it only closes half the
+// gap in a frame, and half of a half turn is still behind — so the frame after a reversal reversed again, and
+// measured the interval between a reversal and itself. That is a period of nothing, and a horizon bounded by
+// a fraction of it is no horizon: a zigzag lost its lead outright at every corner and spent five more frames
+// earning it back, exactly while the hand was up to full speed on the new leg. What a reversal was read
+// against is stale the moment it is read, so it is snapped rather than eased.
+//
+// **Past a certain rate, though, a hand turning back is not something to bound but something to refuse.** The
+// bound above shortens the reach of the guess, and shortening the reach of an answer that points the wrong
+// way only scales it down. A hand doubling back faster than the window is long puts a cusp inside every
+// window, and a parabola through a cusp is not a poor fit to the path — it is a fit to two paths at once, and
+// its slope at the newest sample belongs to neither. That is the one shape the guess made worse than no guess
+// at all: on the frames either side of a turn it led a shaking hand backwards, and no horizon short of
+// nothing fixes a sign.
+//
 // **Braking is believed on thinner evidence than the rest of the fit, and read two ways.** Lead that turns
 // out not to have been needed has to be handed back, and handing it back walks the view backwards under the
 // hand; lead that was never taken is only the lateness this whole thing exists to remove. The two are not
@@ -74,6 +102,18 @@
 // Below a crawl there is no lead at all. Whole mouse counts are all a slow hand produces, and a fit over
 // four of them is mostly quantisation. A caller that keeps what it is given rather than unwinding it keeps
 // every upward wobble too, so left in, that noise became rotation for as long as the drag lasted.
+//
+// **And how fast the hand is going is asked of the window, not of the samples in it.** The two are the same
+// question on a hand that is moving, because a moving hand reports throughout the window; they come apart on
+// a hand that is not. A hand resting on the mouse still crosses a count boundary now and then, and two of
+// those landing three milliseconds apart are a pixel over three milliseconds — a third of a pixel per
+// millisecond, thirteen times a gate written to refuse exactly this, and the resting hand got led. The window
+// was forty milliseconds long and thirty-seven of them held nothing at all, which is the entire evidence that
+// the hand is still, and dividing by the span between two stray counts is what throws it away. So the
+// displacement is taken across the window's trailing edge, which needs the newest sample older than the
+// window to say where the hand was when it opened. Without one there is no history to read and the span is
+// all there is — which is a window a stop has cleared, and a hand starting again is led off its first samples
+// as it always was.
 //
 // The parabola is believed only as far as the path bends more than a path of whole counts appears to bend
 // when it is dead straight, and the answer slides back to the straight line as that margin closes. How
@@ -216,6 +256,11 @@ const TREND_NOISE = 3.6
 // between recent reversals may be extrapolated over.
 const HEADING_MEMORY_MS = 25
 const REVERSAL_HORIZON = 0.4
+// How many windows apart a hand's turns have to be before the window between them holds one motion rather
+// than two. At one window a cusp sits inside every window and nothing is believed; at two the turns are far
+// enough apart that most windows fall between them, and the fit is believed in full. Anything a hand does
+// deliberately — a corner, a zigzag leg, a throw and a correction — is many windows wide and untouched.
+const REVERSAL_WINDOWS = 2
 
 // How long the ramp takes to close on what it is pointed at. A guess from a thin window is smoothed harder
 // than one from a full one: the ramp costs a good device nothing and is the difference between a usable
@@ -319,6 +364,9 @@ export const createPointerPredictor = (options: PredictorOptions = {}) => {
   // shake is fastest it is locally indistinguishable from a hand crossing the pad: same speed, and no
   // acceleration, because the turn is still ahead. Only the memory that it turned round a moment ago
   // separates them, and a memory of events survives that moment where any average does not.
+  // The turn the path was believed to be making when the last guess was made. The heading a reversal is
+  // judged against is carried round by it, so a hand going round is never read as a hand doubling back.
+  let headingTurn = 0
   let headingX = 0
   let headingY = 0
   let msSinceReversal = 1e4
@@ -396,11 +444,23 @@ export const createPointerPredictor = (options: PredictorOptions = {}) => {
     let travelY = 0
     let span = 0
     let used = 0
+    // The first sample too old for the window, if the buffer reaches that far back. It is not fitted — it is
+    // there to say where the hand was when the window opened, which the samples inside it cannot.
+    let beforeT = 0
+    let beforeX = 0
+    let beforeY = 0
+    let reachesBack = false
 
     for (let i = 0; i < count; i++) {
       const index = (newest - i + CAPACITY) % CAPACITY
       const u = times[index]! - newestT
-      if (-u > WINDOW_MS) break
+      if (-u > WINDOW_MS) {
+        beforeT = times[index]!
+        beforeX = xs[index]!
+        beforeY = ys[index]!
+        reachesBack = true
+        break
+      }
       const px = xs[index]! - newestX
       const py = ys[index]! - newestY
       const u2 = u * u
@@ -441,8 +501,33 @@ export const createPointerPredictor = (options: PredictorOptions = {}) => {
     // the travel rather than putting it on the threshold is what keeps an ordinary drag on that device led:
     // four counts across a window are few enough that no curve can be fitted to them and plenty to say how
     // fast the hand is going.
-    const travel = Math.max(0, Math.hypot(travelX, travelY) - (countPx - QUANTISATION_PX))
-    const speed = span > 0 ? travel / span : 0
+    //
+    // Over the window's own length, not over whatever the samples in it happen to span. The two are the same
+    // thing on a hand that is moving, because a moving hand reports throughout; they come apart on a hand
+    // that is not. A still hand crosses a count boundary now and then, and two of those landing a few
+    // milliseconds apart span a few milliseconds — so a pixel of tremor divided by three milliseconds read as
+    // a third of a pixel per millisecond, thirteen times over a gate meant to refuse it, and a hand resting
+    // on the mouse got led. The window was 40ms long and 37ms of it held nothing at all, which is the whole
+    // evidence that the hand is still, and dividing by the span is exactly what throws it away.
+    //
+    // So the displacement is taken over the window's trailing edge, which needs the last sample older than it
+    // to say where the hand was then — the samples inside cannot, and a sparse device has few of them. That
+    // sample sits outside the window, so it is interpolated up to the edge rather than used where it is, or
+    // motion from before the window would be counted as motion in it. Without one the buffer does not reach
+    // back far enough to know, and the span is all there is: a window cleared by a stop is the flick starting
+    // again, and it is led off its first samples as it always was.
+    let reach = Math.hypot(travelX, travelY)
+    let over = span
+    if (reachesBack) {
+      const oldestT = newestT - span
+      const edge = (newestT - WINDOW_MS - beforeT) / (oldestT - beforeT)
+      const edgeX = beforeX + (newestX - travelX - beforeX) * edge
+      const edgeY = beforeY + (newestY - travelY - beforeY) * edge
+      reach = Math.hypot(newestX - edgeX, newestY - edgeY)
+      over = WINDOW_MS
+    }
+    const travel = Math.max(0, reach - (countPx - QUANTISATION_PX))
+    const speed = over > 0 ? travel / over : 0
     const trust = Math.max(0, Math.min(1, (speed - SLOW_PX_PER_MS) / (SURE_PX_PER_MS - SLOW_PX_PER_MS)))
     if (trust === 0) return false
 
@@ -506,8 +591,21 @@ export const createPointerPredictor = (options: PredictorOptions = {}) => {
     const tx = vx / speedNow
     const ty = vy / speedNow
 
-    // Against a heading from a moment ago, so a hand going round a circle never counts as turning back:
-    // it swings tens of degrees in that time, not past a right angle.
+    // Against a heading from a moment ago, carried round by the turn the path is believed to be making, so a
+    // hand going round a circle never counts as turning back.
+    //
+    // A memory that is not carried round is a memory that lags, and on a circle it lags by its own length —
+    // a hand stirring a small one turns eighty degrees in the twenty-five milliseconds the memory covers, so
+    // the heading it is compared against is eighty degrees stale before any noise is added, and the last ten
+    // come free. Then a hand going steadily round reads as a hand turning back several times a lap, the
+    // interval between those readings is nothing like a reversal period, and the horizon is bounded by it.
+    // Carried, the memory turns with the path and only a hand that genuinely leaves the arc reverses. A path
+    // that is not turning is carried by nothing, so straight motion is untouched.
+    const carry = Math.max(-MAX_TURN_RAD, Math.min(MAX_TURN_RAD, headingTurn * deltaMs))
+    const carriedX = headingX * Math.cos(carry) - headingY * Math.sin(carry)
+    const carriedY = headingX * Math.sin(carry) + headingY * Math.cos(carry)
+    headingX = carriedX
+    headingY = carriedY
     const reversed = headingX * tx + headingY * ty < 0
     if (reversed) {
       reversalPeriodMs = msSinceReversal
@@ -517,9 +615,21 @@ export const createPointerPredictor = (options: PredictorOptions = {}) => {
       // Grows back on its own, so one stray reversal cannot shorten the horizon for good.
       reversalPeriodMs = Math.max(reversalPeriodMs, msSinceReversal)
     }
-    const headingRate = 1 - Math.exp(-deltaMs / HEADING_MEMORY_MS)
-    headingX += (tx - headingX) * headingRate
-    headingY += (ty - headingY) * headingRate
+    if (reversed) {
+      // Snapped rather than eased, because the old heading is what the reversal was just read against and
+      // keeping any of it says the hand is still going the old way. Eased, a turn through a half circle
+      // leaves the average still pointing back on the next frame — the memory only closes half the gap in a
+      // frame — so the same reversal is counted twice, and the second reading measures the interval between
+      // a reversal and itself. That is a period of nothing, and the horizon is bounded by a fraction of the
+      // period: a zigzag lost its lead outright for the frame after every corner and spent five more
+      // earning the horizon back, at exactly the moment the hand was up to full speed on the new leg.
+      headingX = tx
+      headingY = ty
+    } else {
+      const headingRate = 1 - Math.exp(-deltaMs / HEADING_MEMORY_MS)
+      headingX += (tx - headingX) * headingRate
+      headingY += (ty - headingY) * headingRate
+    }
     const nx = -ty
     const ny = tx
 
@@ -663,6 +773,7 @@ export const createPointerPredictor = (options: PredictorOptions = {}) => {
         // that lags on a circle points outwards. That is the marker sitting outside the circle.
         turn = turnAverage * believed
         carriedTurn = turn
+        headingTurn = turn
       }
     }
 
@@ -677,6 +788,18 @@ export const createPointerPredictor = (options: PredictorOptions = {}) => {
     // guess is extrapolating through a reversal it has no way to see, and on a quick shake it ran further
     // than the whole width of the motion.
     let horizon = Math.min(horizonMs, reversalPeriodMs * REVERSAL_HORIZON)
+    // And nothing at all is believed of a hand turning round faster than the window is long. The cap above
+    // bounds how far past the newest sample the guess may reach; this asks the prior question, which is
+    // whether the window behind it describes one motion or several. A hand doubling back every 40ms puts a
+    // cusp inside every window, and a parabola through a cusp is not a bad fit to the path — it is a fit to
+    // two paths at once, and its slope at the newest sample belongs to neither. Shortening the reach of an
+    // answer like that only scales down something already pointing the wrong way.
+    //
+    // Which is why a shake was the one shape the guess made worse than no guess at all: on the frames either
+    // side of a turn it led the hand backwards, and no horizon short of nothing fixes a sign. Held to this,
+    // a hand shaking faster than the window is left alone — the score comes back to what a caller who never
+    // guessed would have had, instead of sitting several percent under it.
+    horizon *= Math.max(0, Math.min(1, (reversalPeriodMs / WINDOW_MS - 1) / (REVERSAL_WINDOWS - 1)))
     // Nor further ahead than the path turns a quarter circle over. Past that the answer is mostly the turn
     // rate — the noisiest thing in the fit — and the chord it is asking for has stopped growing with the
     // horizon and started shrinking back towards the hand, so a wobble in the rate moves the guess about the
@@ -925,6 +1048,7 @@ export const createPointerPredictor = (options: PredictorOptions = {}) => {
     lastSpeed = -1
     speedTrend = 0
     carriedTurn = 0
+    headingTurn = 0
     headingX = 0
     headingY = 0
     msSinceReversal = 1e4

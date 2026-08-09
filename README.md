@@ -278,7 +278,23 @@ The rest is mostly about not believing noise:
   refreshes of lead the guess sat 58px off a 25px circle. Bounded, it reads the same at one refresh and at
   four.
 - **The guess is never led past its own reversal.** A quick shake turns round before the horizon is out, and
-  at the moment it is fastest there is no acceleration to give the turn away.
+  at the moment it is fastest there is no acceleration to give the turn away. That makes the heading the last
+  reversal is remembered as load bearing, and it is both carried and snapped. Carried round by the turn the
+  path is believed to be making, because a memory that is not is a memory that lags: it covers 25ms, a hand
+  stirring a small circle turns 80° in that time, and a hand going steadily round therefore read as a hand
+  turning back several times a lap. Snapped to the new heading rather than eased onto it, because easing only
+  closes half the gap in a frame and half of a half turn is still behind — so one reversal was counted as two,
+  the second measuring the interval between a reversal and itself. A zigzag lost its lead outright at every
+  corner and spent five more frames earning it back, while the hand was already at full speed on the new leg.
+- **Past a certain rate a reversal is refused rather than bounded.** Shortening the reach of a guess that
+  points the wrong way only scales it down. A hand doubling back faster than the window is long puts a cusp
+  inside every window, and a parabola through a cusp is a fit to two paths at once whose slope belongs to
+  neither — which is why a shake was the one shape the guess made worse than no guess at all.
+- **How fast the hand is going is asked of the window, not of the samples in it.** The two agree on a hand
+  that is moving, since a moving hand reports throughout; they part on a hand that is not. A hand resting on
+  the mouse still crosses a count boundary now and then, and two of those landing 3ms apart are a pixel over
+  3ms — thirteen times a gate written to refuse exactly that, so the resting hand got led. The window was 40ms
+  long and 37ms of it held nothing, which is the whole evidence the hand is still.
 
 ## The rig
 

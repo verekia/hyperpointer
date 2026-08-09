@@ -267,7 +267,16 @@ const LIMITS: Record<string, Limits> = {
   },
   // A stir: small and quick enough that a whole horizon of it sweeps past a right angle, which is where the
   // arc has to stop being believed rather than wrap round.
-  stir: { gain: 0.95, size: 15, over: 0, late: 40, kick: 0, back: 0, still: 0, lead: 35, jump: 30, kept: 50 },
+  //
+  // `jump` is the one figure here bought rather than won. A hand going round this fast used to read as a hand
+  // turning back — the heading it is judged against lagged eighty degrees behind on a lap this tight — and the
+  // reversal bound left the slow devices leading half what the fast ones led: 12px against 27px on the same
+  // circle. Carried round with the path they lead it properly, and the score says so at every reading but
+  // this one: the error falls a seventh, the size of the guess wobbles half as much, and it moves against the
+  // hand essentially never. What a bigger guess costs on a device reporting three times a lap is evenness,
+  // and 23px of the 30 is there with no guess at all, because a hand turning 55 degrees between two frames is
+  // most of the unevenness by itself.
+  stir: { gain: 0.95, size: 15, over: 0, late: 40, kick: 0, back: 0, still: 0, lead: 35, jump: 33, kept: 50 },
   // The same circle with a hand on it, so the quantisation error stops being a function of the angle and
   // starts being noise. It scores like the clean one, which is what says the clean one is not being flattered
   // by its own regularity.
@@ -484,8 +493,14 @@ describe('raising the lead does not throw a small circle apart', () => {
   // The horizon is bounded by how far the path turns over it now, so the answer stops growing with the
   // setting instead: what a longer lead cannot buy, it no longer spends. Each row is the worst reading
   // across the four devices, and the figures hold at one refresh of lead and at four alike.
+  //
+  // `off` is the figure that says it: the guess stays the same distance from the circle at four refreshes of
+  // lead as at one, which is the property being defended. `jump` on the tightest of the three is a ceiling on
+  // evenness rather than on the guess going astray — a hand turning 55 degrees between two frames moves the
+  // picture unevenly on a device reporting three times a lap whether or not anything is guessed, and 23px of
+  // the 31 below is what that device does with no lead at all.
   const CIRCLES = [
-    { r: 25, periodMs: 110, off: 10, jump: 24 },
+    { r: 25, periodMs: 110, off: 10, jump: 31 },
     { r: 15, periodMs: 150, off: 3, jump: 15 },
     { r: 25, periodMs: 200, off: 3.5, jump: 19 },
   ]
