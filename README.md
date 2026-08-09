@@ -266,6 +266,39 @@ The red square is the reported position, the green circle is the prediction, and
 (the compositor draws it, so it is never late). `?compare=1` shows two leads at once; `?nocursor=1`,
 `?noreported=1` and `?nopredicted=1` strip the frame down to what you want to read.
 
+## Changing the prediction
+
+The rig above is the only way to see presentation latency, and it needs a hand, a camera and an afternoon.
+Everything else is measured off a replay instead, so the fit can be changed and judged without one:
+
+```bash
+bun test                       # 30 shapes × 9 devices, against floors that were measured
+bun run bench                  # the same runs, printed as numbers
+bun run bench circle --all     # one family of shapes, on every device
+bun run bench --save before.json
+bun run bench --diff before.json   # what your change actually moved, marked ↓ better ↑ worse
+```
+
+A hand moves along a known path, a modelled device reports it in whole counts at its own rate and with its
+own clock wander, a frame loop reads the lead back out, and the run is scored against where the hand really
+is when each frame reaches the screen. Both ends are modelled because both ends matter: a wired mouse and one
+on a radio are different problems, and so are 60Hz and 144Hz.
+
+The shapes are in `library/src/__tests__/harness.ts` — steady drags from a crawl to a whip, flicks stopping
+in anywhere from 40ms to 400ms, circles, figure eights, spirals, corners taken sharp and round, shakes,
+zigzags, target acquisition, tremor, and stops and starts between all of them. Add one there and the
+scoreboard picks it up; the shapes suite will then fail until it is given a floor, which is the point.
+
+What is scored, per run: how far past the hand the guess ever sat and how far behind, how much the picture
+moved against the hand or moved at all while the hand was still, how far the guess jumped in a frame, and the
+error against the error of not guessing at all. Overshooting and falling short are never added together —
+lead that was never needed has to be handed back, and handing it back walks the view backwards under the
+hand, where lead that was never taken is only the lateness the library exists to remove.
+
+Every figure in a test was read off that rig and given about a quarter more room. **Improve one and tighten
+it in the same change**, or the floor stops being a floor. Most changes trade one column for another; the
+`--diff` output is there so the trade is visible rather than discovered later on somebody's desk.
+
 ## License
 
 MIT

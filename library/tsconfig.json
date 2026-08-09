@@ -2,6 +2,9 @@
   "compilerOptions": {
     // Environment
     "lib": ["ESNext", "DOM"],
+    // The replay rig and the scoreboard under `src/__tests__` are run by Bun, not shipped, and the
+    // scoreboard reads a baseline file and its own arguments.
+    "types": ["bun"],
     "target": "ESNext",
     "module": "Preserve",
     "moduleDetection": "force",

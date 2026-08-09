@@ -1,14 +1,13 @@
 import { beforeEach, describe, expect, test } from 'bun:test'
 
 import { createPointerPredictor, DEFAULT_MAX_LEAD_PX, DEFAULT_DECAY_MS, DEFAULT_LEAD_FRAMES } from '../predictor.js'
+import { AGE, BLUETOOTH, circle, FRAME, flick, replay, shake, SLOW_RADIO, steady, TRACKPAD, WIRED } from './harness.js'
 
-const FRAME = 16.7
 // Track what ships, so the floor is the floor of the thing that ships.
 const LEAD_FRAMES = DEFAULT_LEAD_FRAMES
 const DECAY = 20
 const CAP = 40
 const SAMPLES_PER_FRAME = 16 // a 1000Hz mouse, which is what puts several samples in one frame
-const AGE = 13 // what the newest sample's age measures at at 60Hz, per the example rig
 
 describe('pointer prediction', () => {
   let predictor = createPointerPredictor()
@@ -502,187 +501,44 @@ describe('pointer prediction', () => {
 // changing, every bit of it is jitter, and jitter on a camera is nauseating. Accuracy is scored against
 // where the hand really is when the frame reaches the screen, and has to beat not guessing at all.
 //
-// Breaking each part of the predictor in turn fails something here, with one exception worth knowing
-// about: CURVE_TRUST_MS can be set to nothing and every figure below stays put. It settles how far the
-// curve is believed, which also decides how hard the lead is smoothed, and left unsettled that judgement
-// flips frame to frame and the smoothing switches on and off with it. The synthetic hands here move too
-// perfectly for the bend to cross its noise floor, so they never produce the flicker. It was found by hand
-// on a Bluetooth mouse and confirmed by removing it twice. Do not read its lack of a test as it having no
-// job.
+// This file is the original floor and stays as the shortest description of what the predictor owes. The
+// broad sweep lives next door — `predictor-shapes`, `predictor-stops`, `predictor-devices` and
+// `predictor-invariants`, all replayed through `harness.ts`, which is also what `bun run bench` prints.
+//
+// Every constant in `predictor.ts` was broken in turn against the whole suite and every one of them fails
+// something, which is the property worth keeping as it grows. Two lines are not reached by any hand that
+// can be modelled here, and are worth knowing about rather than testing for the sake of it:
+//
+//   - `MAX_TURN_RAD`, which clamps how far one horizon of arc may sweep. By the time the turn rate has been
+//     through its own noise gate, a hand would have to be circling faster than nine revolutions a second to
+//     reach it. It is a guard against a fit that has run away, not against a hand.
+//   - The horizon being cut short at the point the fit says the hand stops. Past that point the distance is
+//     already floored at zero, so removing the cut moves nothing measurably.
+//
+// CURVE_TRUST_MS used to be a third: the synthetic hands in this file move too perfectly for the bend to
+// sit near its noise floor, which is the flicker it exists to stop. The tremor and coarse-count cases next
+// door do produce it, so setting it to nothing now fails seventeen tests.
 describe('pointer prediction quality floor', () => {
-  // How many refreshes after a frame is drawn it reaches the screen. No clock inside a page can see this,
-  // which is why the example rig exists — so it is an assumption, and the lead is set to match it. Tying
-  // the two together is the point: the guess is judged against the pipeline it is aimed at, and if the rig
-  // says that pipeline is a different depth, both move and these figures are re-measured.
-  const PRESENT_FRAMES = DEFAULT_LEAD_FRAMES
-
-  /** How a device reports: how often, how many at a time, and how much its clock wanders. */
-  type Device = { periodMs: number; burst: number; jitterMs: number }
-  const WIRED: Device = { periodMs: 1, burst: 1, jitterMs: 0.1 }
-  const TRACKPAD: Device = { periodMs: 11, burst: 1, jitterMs: 0.4 }
-  // A mouse on a radio: reports in clumps, and says nothing at all for a third of frames while moving.
-  const BLUETOOTH: Device = { periodMs: 8, burst: 3, jitterMs: 2.5 }
-  // Slower still, and the one whose gaps most resemble a hand that has stopped.
-  const SLOW_RADIO: Device = { periodMs: 16, burst: 2, jitterMs: 3 }
-
-  /** `hitchEvery` stalls one frame in that many to three times its length, as a real one does. */
-  const replay = (
-    path: (t: number) => { x: number; y: number },
-    device: Device,
-    durationMs: number,
-    hitchEvery = 0,
-  ) => {
-    const predictor = createPointerPredictor()
-    let seed = 20260808
-    const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff
-
-    let reportedX = 0
-    let reportedY = 0
-    let integratedX = 0
-    let integratedY = 0
-    let frameAt = 0
-    let prevFrameAt = 0
-    let nextReport = 0
-    let previous: { x: number; y: number } | null = null
-    // What a caller applying only the growth accumulates. Jitter is rectified into rotation there: every
-    // upward wobble is kept and none of the downward ones give it back.
-    let keptX = 0
-    let keptY = 0
-    let appliedX = 0
-    let appliedY = 0
-    let worstStep = 0
-    let worstLead = 0
-    let worstOvershoot = 0
-    let radialSum = 0
-    let withSum = 0
-    let withoutSum = 0
-    let scored = 0
-
-    let frameIndex = 0
-    while (frameAt <= durationMs) {
-      frameIndex++
-      frameAt += FRAME * (hitchEvery > 0 && frameIndex % hitchEvery === 0 ? 3 : 1)
-      // Events are held until shortly before the callback, and arrive a burst at a time.
-      while (nextReport <= frameAt - 2) {
-        for (let b = 0; b < device.burst; b++) {
-          const t = nextReport - (device.burst - 1 - b) * device.periodMs + (rnd() - 0.5) * device.jitterMs
-          if (t <= 0) continue
-          const at = path(t)
-          // Whole mouse counts, as a real device reports.
-          const dx = Math.trunc(at.x) - reportedX
-          const dy = Math.trunc(at.y) - reportedY
-          if (dx !== 0 || dy !== 0) {
-            predictor.push(t, dx, dy)
-            reportedX += dx
-            reportedY += dy
-            integratedX += dx
-            integratedY += dy
-          }
-        }
-        nextReport += device.periodMs * device.burst
-      }
-
-      const lead = predictor.update({
-        nowMs: frameAt,
-        deltaMs: frameAt - prevFrameAt,
-        leadFrames: LEAD_FRAMES,
-        decayMs: DEFAULT_DECAY_MS,
-        maxLeadPx: DEFAULT_MAX_LEAD_PX,
-      })
-      prevFrameAt = frameAt
-
-      const growth = (value: number, applied: number) =>
-        value * applied >= 0 && Math.abs(value) > Math.abs(applied) ? value - applied : 0
-      keptX += growth(lead.x, appliedX)
-      keptY += growth(lead.y, appliedY)
-      appliedX = lead.x
-      appliedY = lead.y
-
-      // Once the window is full of the motion rather than of starting up.
-      if (frameAt > 600) {
-        if (previous) worstStep = Math.max(worstStep, Math.hypot(lead.x - previous.x, lead.y - previous.y))
-        const truth = path(frameAt + PRESENT_FRAMES * FRAME)
-
-        // How far past the hand the guess sits, along the way the hand is going. Overshooting and falling
-        // short are not the same error and are not worth scoring as one: lead that was never there has to
-        // be handed back, and handing it back is a reversal on screen, where falling short is only the
-        // lateness this whole thing exists to remove.
-        const ahead = path(frameAt + PRESENT_FRAMES * FRAME + 1)
-        const behind = path(frameAt + PRESENT_FRAMES * FRAME - 1)
-        const towardsX = ahead.x - behind.x
-        const towardsY = ahead.y - behind.y
-        const towards = Math.hypot(towardsX, towardsY)
-        if (towards > 1e-9) {
-          const past =
-            ((integratedX + lead.x - truth.x) * towardsX + (integratedY + lead.y - truth.y) * towardsY) / towards
-          worstOvershoot = Math.max(worstOvershoot, past)
-        }
-        withSum += (integratedX + lead.x - truth.x) ** 2 + (integratedY + lead.y - truth.y) ** 2
-        withoutSum += (integratedX - truth.x) ** 2 + (integratedY - truth.y) ** 2
-        radialSum += Math.hypot(integratedX + lead.x, integratedY + lead.y)
-        worstLead = Math.max(worstLead, Math.hypot(lead.x, lead.y))
-        scored++
-      }
-      previous = { x: lead.x, y: lead.y }
-    }
-
-    return {
-      worstStep,
-      error: Math.sqrt(withSum / Math.max(1, scored)),
-      errorWithout: Math.sqrt(withoutSum / Math.max(1, scored)),
-      meanRadius: radialSum / Math.max(1, scored),
-      kept: Math.hypot(keptX, keptY),
-      worstLead,
-      worstOvershoot,
-    }
-  }
-
-  const steady = (speed: number, angleDeg: number) => (t: number) => ({
-    x: speed * Math.cos((angleDeg * Math.PI) / 180) * t,
-    y: speed * Math.sin((angleDeg * Math.PI) / 180) * t,
-  })
-  const shake = (amplitude: number, hz: number) => (t: number) => ({
-    x: amplitude * Math.sin((2 * Math.PI * hz * t) / 1000),
-    y: 0,
-  })
-  const circle = (r: number, periodMs: number) => (t: number) => ({
-    x: r * Math.cos((2 * Math.PI * t) / periodMs),
-    y: r * Math.sin((2 * Math.PI * t) / periodMs),
-  })
-  // A hand that throws the view somewhere and lets go: a cruise, then a cosine ease down to a dead stop
-  // over fallMs. The stop is the whole point — it is the one moment the guess is asked to give back
-  // everything it is holding, and the moment it is furthest from being able to see it coming.
-  const flick = (speed: number, angleDeg: number, cruiseMs: number, fallMs: number) => {
-    const ux = Math.cos((angleDeg * Math.PI) / 180)
-    const uy = Math.sin((angleDeg * Math.PI) / 180)
-    const travelled = (t: number) => {
-      if (t <= cruiseMs) return speed * t
-      const u = Math.min(t - cruiseMs, fallMs)
-      return speed * (cruiseMs + u / 2 + (fallMs / (2 * Math.PI)) * Math.sin((Math.PI * u) / fallMs))
-    }
-    return (t: number) => ({ x: ux * travelled(t), y: uy * travelled(t) })
-  }
-
   // A diagonal is the hard case for steadiness: the two axes cross their whole-count boundaries at
   // different moments, so the path the fit sees zig-zags about the true line.
   test('a wired mouse on a steady diagonal barely moves the lead at all', () => {
-    expect(replay(steady(0.8, 30), WIRED, 2500).worstStep).toBeLessThan(0.15)
+    expect(replay({ path: steady(0.8, 30), device: WIRED, durationMs: 2500 }).worstStep).toBeLessThan(0.15)
   })
 
   test('a trackpad on a steady diagonal is nearly as steady as a wired mouse', () => {
-    expect(replay(steady(0.8, 30), TRACKPAD, 2500).worstStep).toBeLessThan(0.4)
+    expect(replay({ path: steady(0.8, 30), device: TRACKPAD, durationMs: 2500 }).worstStep).toBeLessThan(0.4)
   })
 
   test('a mouse on a radio is within reach of the other two', () => {
     // It reports a fifth as often and in clumps, so it will never match them; it must stay close enough
     // that no device makes the camera shake.
-    expect(replay(steady(0.8, 30), BLUETOOTH, 2500).worstStep).toBeLessThan(0.9)
-    expect(replay(steady(0.8, 30), SLOW_RADIO, 2500).worstStep).toBeLessThan(0.8)
+    expect(replay({ path: steady(0.8, 30), device: BLUETOOTH, durationMs: 2500 }).worstStep).toBeLessThan(0.9)
+    expect(replay({ path: steady(0.8, 30), device: SLOW_RADIO, durationMs: 2500 }).worstStep).toBeLessThan(0.8)
   })
 
   test('slow motion is steady on every device, which is where a shaky guess shows most', () => {
     for (const device of [WIRED, TRACKPAD, BLUETOOTH, SLOW_RADIO]) {
-      expect(replay(steady(0.15, 30), device, 2500).worstStep).toBeLessThan(0.35)
+      expect(replay({ path: steady(0.15, 30), device, durationMs: 2500 }).worstStep).toBeLessThan(0.35)
     }
   })
 
@@ -827,7 +683,7 @@ describe('pointer prediction quality floor', () => {
     // four seconds at a crawl this used to reach nearly four times the lead it should have left behind.
     for (const device of [WIRED, TRACKPAD, BLUETOOTH, SLOW_RADIO]) {
       const speed = 0.06
-      const { kept } = replay(steady(speed, 30), device, 4000)
+      const { kept } = replay({ path: steady(speed, 30), device, durationMs: 4000 })
       const oneLead = speed * (13 + LEAD_FRAMES * FRAME)
       expect(kept).toBeLessThan(oneLead * 0.6)
     }
@@ -838,7 +694,7 @@ describe('pointer prediction quality floor', () => {
     // taken for one. Believing it moves the horizon by two frames and hands over pixels of lead on the
     // frame after every stall.
     for (const device of [WIRED, TRACKPAD, BLUETOOTH]) {
-      expect(replay(steady(0.8, 30), device, 3000, 20).worstStep).toBeLessThan(1.15)
+      expect(replay({ path: steady(0.8, 30), device, durationMs: 3000, hitchEvery: 20 }).worstStep).toBeLessThan(1.15)
     }
   })
 
@@ -852,7 +708,7 @@ describe('pointer prediction quality floor', () => {
       [40, 8],
       [10, 12],
     ] as const) {
-      const { worstLead, error, errorWithout } = replay(shake(amplitude, hz), WIRED, 2500)
+      const { worstLead, error, errorWithout } = replay({ path: shake(amplitude, hz), device: WIRED, durationMs: 2500 })
       // Never further out than the motion itself is wide. A shake is a stop twice a cycle, so reading the
       // braking sooner pulled both of these in and they were tightened to match.
       expect(worstLead).toBeLessThan(amplitude * 0.55)
@@ -872,7 +728,7 @@ describe('pointer prediction quality floor', () => {
       [120, 300, 4],
       [200, 400, 3],
     ] as const) {
-      const { meanRadius } = replay(circle(r, periodMs), WIRED, 3000)
+      const { meanRadius } = replay({ path: circle(r, periodMs), device: WIRED, durationMs: 3000 })
       expect(meanRadius - r).toBeLessThan(tolerance)
       expect(meanRadius - r).toBeGreaterThan(-tolerance)
     }
@@ -898,7 +754,11 @@ describe('pointer prediction quality floor', () => {
     for (const [device, ...allowed] of limits) {
       const falls = [80, 150, 250] as const
       falls.forEach((fallMs, i) => {
-        const { worstOvershoot, error, errorWithout } = replay(flick(2.6, 20, 800, fallMs), device, 800 + fallMs + 300)
+        const { worstOvershoot, error, errorWithout } = replay({
+          path: flick(2.6, 20, 800, fallMs),
+          device,
+          durationMs: 800 + fallMs + 300,
+        })
         expect(worstOvershoot).toBeLessThan(allowed[i]!)
         // And none of that may be bought by simply not guessing, which would score perfectly here.
         expect(error).toBeLessThan(errorWithout * 0.45)
@@ -908,10 +768,10 @@ describe('pointer prediction quality floor', () => {
 
   test('guessing beats not guessing, on every device and both kinds of path', () => {
     for (const device of [WIRED, TRACKPAD, BLUETOOTH, SLOW_RADIO]) {
-      const straight = replay(steady(0.8, 30), device, 2500)
+      const straight = replay({ path: steady(0.8, 30), device, durationMs: 2500 })
       expect(straight.error).toBeLessThan(straight.errorWithout * 0.35)
 
-      const round = replay(circle(120, 400), device, 3000)
+      const round = replay({ path: circle(120, 400), device, durationMs: 3000 })
       expect(round.error).toBeLessThan(round.errorWithout * 0.75)
     }
   })

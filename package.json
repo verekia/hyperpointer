@@ -17,6 +17,7 @@
     "format": "oxfmt .",
     "format:check": "oxfmt --check .",
     "test": "bun test",
+    "bench": "bun run library/src/__tests__/scoreboard.ts",
     "warden": "warden",
     "all": "bun run format:check && bun run lint && bun run typecheck && bun run warden && bun run test",
     "prepare": "husky",
