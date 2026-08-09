@@ -25,6 +25,9 @@ import { circle, DEVICES, replay, SCENARIOS, WIRED, worstAcross, type Metrics } 
 //   back   all of that added up over the run.
 //   still  screen motion over frames where the hand is not moving at all.
 //   lead   how far out the guess may ever be.
+//   kept   what a locked-pointer caller accumulates, which keeps the growth of the lead and never gives it
+//          back. Believing a turn rotates the guess, and rotation is growth on both axes in turn, so this is
+//          where every decision about how far to believe a turn is paid for.
 //   jump   the worst frame where the picture moved further, or less far, than it should have. A hand at a
 //          constant speed makes a picture that moves the same distance every frame, and the eye reads any
 //          departure from that as a jump — which is the artefact a user actually reports, and not the same
@@ -39,20 +42,65 @@ type Limits = {
   still: number
   lead: number
   jump: number
+  kept: number
 }
 
 const LIMITS: Record<string, Limits> = {
   // Straight lines. Nothing here is hard to predict, so these are almost entirely about steadiness: the hand
   // is doing nothing new, and every pixel the guess moves by is invented.
-  'steady fast': { gain: 0.35, size: 0.75, over: 15, late: 25, kick: 0, back: 0, still: 0, lead: 30, jump: 20 },
-  'steady slow': { gain: 0.76, size: 0.3, over: 0, late: 8.5, kick: 0.1, back: 1, still: 0, lead: 3, jump: 4.5 },
+  'steady fast': {
+    gain: 0.35,
+    size: 0.75,
+    over: 15,
+    late: 25,
+    kick: 0,
+    back: 0,
+    still: 0,
+    lead: 30,
+    jump: 20,
+    kept: 60,
+  },
+  'steady slow': {
+    gain: 0.76,
+    size: 0.3,
+    over: 0,
+    late: 8.5,
+    kick: 0.1,
+    back: 1,
+    still: 0,
+    lead: 3,
+    jump: 4.5,
+    kept: 8,
+  },
   // Below the speed gate there is no lead at all, so this one is exact rather than generous: a single pixel
   // of guess here is quantisation being mistaken for motion, and a caller keeping the growth keeps it.
-  crawl: { gain: 1.06, size: 0, over: 0, late: 5.5, kick: 0, back: 0, still: 0, lead: 0, jump: 1.5 },
-  'steady on-axis': { gain: 0.35, size: 0.8, over: 15, late: 25, kick: 0, back: 0, still: 0, lead: 30, jump: 20 },
+  crawl: { gain: 1.06, size: 0, over: 0, late: 5.5, kick: 0, back: 0, still: 0, lead: 0, jump: 1.5, kept: 0 },
+  'steady on-axis': {
+    gain: 0.35,
+    size: 0.8,
+    over: 15,
+    late: 25,
+    kick: 0,
+    back: 0,
+    still: 0,
+    lead: 30,
+    jump: 20,
+    kept: 60,
+  },
   // Far past the cap, so what is being judged is that the ceiling holds and nothing rings against it.
-  whip: { gain: 0.44, size: 0.7, over: 35, late: 150, kick: 0.01, back: 0.01, still: 0, lead: 150, jump: 90 },
-  'ramp up': { gain: 0.4, size: 4, over: 45, late: 85, kick: 0, back: 0, still: 0, lead: 150, jump: 85 },
+  whip: {
+    gain: 0.44,
+    size: 0.7,
+    over: 35,
+    late: 150,
+    kick: 0.05,
+    back: 0.05,
+    still: 0,
+    lead: 150,
+    jump: 90,
+    kept: 150,
+  },
+  'ramp up': { gain: 0.4, size: 4, over: 45, late: 85, kick: 0, back: 0, still: 0, lead: 150, jump: 85, kept: 150 },
 
   // Stops. The one moment the guess is asked to give everything back, and the moment it is furthest from
   // being able to see it coming — `still` is what that costs on screen.
@@ -66,84 +114,243 @@ const LIMITS: Record<string, Limits> = {
     still: 40,
     lead: 95,
     jump: 70,
+    kept: 150,
   },
-  'flick, eased stop': { gain: 0.4, size: 20, over: 45, late: 65, kick: 9.5, back: 30, still: 30, lead: 95, jump: 55 },
-  'abrupt stop': { gain: 0.55, size: 25, over: 30, late: 50, kick: 0, back: 0, still: 85, lead: 75, jump: 80 },
-  'abrupt start': { gain: 0.47, size: 10, over: 30, late: 150, kick: 0, back: 0, still: 0, lead: 75, jump: 60 },
-  'stop and go': { gain: 0.72, size: 20, over: 35, late: 85, kick: 15, back: 35, still: 250, lead: 55, jump: 60 },
-  'point to point': { gain: 0.63, size: 6, over: 20, late: 50, kick: 3.5, back: 15, still: 55, lead: 45, jump: 30 },
+  'flick, eased stop': {
+    gain: 0.4,
+    size: 20,
+    over: 45,
+    late: 65,
+    kick: 9.5,
+    back: 30,
+    still: 30,
+    lead: 95,
+    jump: 55,
+    kept: 150,
+  },
+  'abrupt stop': {
+    gain: 0.55,
+    size: 25,
+    over: 30,
+    late: 50,
+    kick: 0,
+    back: 0,
+    still: 85,
+    lead: 75,
+    jump: 80,
+    kept: 95,
+  },
+  'abrupt start': {
+    gain: 0.47,
+    size: 10,
+    over: 30,
+    late: 150,
+    kick: 0,
+    back: 0,
+    still: 0,
+    lead: 75,
+    jump: 60,
+    kept: 95,
+  },
+  'stop and go': {
+    gain: 0.72,
+    size: 20,
+    over: 35,
+    late: 85,
+    kick: 15,
+    back: 35,
+    still: 250,
+    lead: 55,
+    jump: 60,
+    kept: 350,
+  },
+  'point to point': {
+    gain: 0.63,
+    size: 6,
+    over: 20,
+    late: 50,
+    kick: 3.5,
+    back: 15,
+    still: 55,
+    lead: 45,
+    jump: 30,
+    kept: 55,
+  },
 
   // Turns. A per-axis fit reads the extremum of every one of these as a hand that is stopping, which is
   // exactly backwards, so these are the cases the 2D fit exists for.
-  'sharp corner': { gain: 0.49, size: 6, over: 20, late: 55, kick: 0, back: 0, still: 0, lead: 45, jump: 35 },
-  'corner, 45 degrees': { gain: 0.42, size: 4, over: 35, late: 85, kick: 0, back: 0, still: 0, lead: 90, jump: 60 },
-  'corner, 90 degrees': { gain: 0.55, size: 15, over: 35, late: 150, kick: 0, back: 0, still: 0, lead: 90, jump: 65 },
+  'sharp corner': {
+    gain: 0.48,
+    size: 6,
+    over: 20,
+    late: 55,
+    kick: 0.25,
+    back: 0.25,
+    still: 0,
+    lead: 45,
+    jump: 35,
+    kept: 80,
+  },
+  'corner, 45 degrees': {
+    gain: 0.42,
+    size: 4,
+    over: 35,
+    late: 85,
+    kick: 0,
+    back: 0,
+    still: 0,
+    lead: 90,
+    jump: 60,
+    kept: 150,
+  },
+  'corner, 90 degrees': {
+    gain: 0.53,
+    size: 15,
+    over: 35,
+    late: 150,
+    kick: 0,
+    back: 0,
+    still: 0,
+    lead: 90,
+    jump: 70,
+    kept: 150,
+  },
   'corner, 135 degrees': {
-    gain: 0.65,
+    gain: 0.61,
     size: 20,
     over: 35,
     late: 200,
-    kick: 40,
-    back: 40,
+    kick: 45,
+    back: 45,
     still: 0,
     lead: 90,
     jump: 75,
+    kept: 150,
   },
-  'corner, slow': { gain: 0.5, size: 2.5, over: 7, late: 25, kick: 0, back: 0, still: 0, lead: 20, jump: 15 },
+  'corner, slow': { gain: 0.5, size: 2.5, over: 7, late: 25, kick: 0, back: 0, still: 0, lead: 20, jump: 15, kept: 35 },
   'zigzag, sharp and fast': {
-    gain: 0.89,
+    gain: 0.94,
     size: 15,
-    over: 50,
+    over: 45,
     late: 150,
     kick: 35,
-    back: 50,
+    back: 45,
     still: 0,
     lead: 65,
-    jump: 60,
+    jump: 65,
+    kept: 150,
   },
-  'rounded corner': { gain: 0.47, size: 2, over: 20, late: 50, kick: 0, back: 0, still: 0, lead: 45, jump: 30 },
-  circle: { gain: 0.34, size: 7.5, over: 25, late: 50, kick: 0, back: 0, still: 0, lead: 70, jump: 50 },
+  'rounded corner': {
+    gain: 0.4,
+    size: 2,
+    over: 20,
+    late: 40,
+    kick: 0,
+    back: 0,
+    still: 0,
+    lead: 45,
+    jump: 30,
+    kept: 80,
+  },
+  circle: { gain: 0.34, size: 7.5, over: 25, late: 50, kick: 0, back: 0, still: 0, lead: 70, jump: 50, kept: 75 },
   'circle, tight and fast': {
     gain: 0.39,
     size: 5,
-    over: 20,
+    over: 15,
     late: 35,
-    kick: 0.75,
-    back: 0.75,
+    kick: 0.2,
+    back: 0.2,
     still: 0,
     lead: 55,
     jump: 45,
+    kept: 40,
   },
   // A stir: small and quick enough that a whole horizon of it sweeps past a right angle, which is where the
   // arc has to stop being believed rather than wrap round.
-  stir: { gain: 0.95, size: 15, over: 0, late: 40, kick: 0, back: 0, still: 0, lead: 35, jump: 30 },
+  stir: { gain: 0.95, size: 15, over: 0, late: 40, kick: 0, back: 0, still: 0, lead: 35, jump: 30, kept: 50 },
   // The same circle with a hand on it, so the quantisation error stops being a function of the angle and
   // starts being noise. It scores like the clean one, which is what says the clean one is not being flattered
   // by its own regularity.
-  'circle, hand-drawn': { gain: 0.35, size: 9, over: 25, late: 50, kick: 0, back: 0, still: 0, lead: 75, jump: 50 },
-  'circle, reversed': { gain: 0.34, size: 7.5, over: 25, late: 50, kick: 0, back: 0, still: 0, lead: 70, jump: 50 },
-  'figure eight': { gain: 0.86, size: 7.5, over: 15, late: 65, kick: 2.5, back: 3.5, still: 0, lead: 50, jump: 35 },
-  spiral: { gain: 0.58, size: 8, over: 30, late: 75, kick: 0, back: 0, still: 0, lead: 95, jump: 60 },
-  serpentine: { gain: 0.69, size: 3.5, over: 15, late: 45, kick: 0, back: 0, still: 0, lead: 30, jump: 25 },
+  'circle, hand-drawn': {
+    gain: 0.35,
+    size: 9,
+    over: 25,
+    late: 50,
+    kick: 0,
+    back: 0,
+    still: 0,
+    lead: 75,
+    jump: 50,
+    kept: 90,
+  },
+  'circle, reversed': {
+    gain: 0.34,
+    size: 7.5,
+    over: 25,
+    late: 50,
+    kick: 0,
+    back: 0,
+    still: 0,
+    lead: 70,
+    jump: 50,
+    kept: 75,
+  },
+  'figure eight': {
+    gain: 0.75,
+    size: 7.5,
+    over: 9.5,
+    late: 60,
+    kick: 0.4,
+    back: 0.4,
+    still: 0,
+    lead: 45,
+    jump: 35,
+    kept: 90,
+  },
+  spiral: { gain: 0.37, size: 8, over: 30, late: 65, kick: 0, back: 0, still: 0, lead: 95, jump: 55, kept: 75 },
+  serpentine: { gain: 0.66, size: 4, over: 9.5, late: 45, kick: 0, back: 0, still: 0, lead: 35, jump: 25, kept: 200 },
   // A turn slow enough and wide enough that the angle between the window's two halves barely clears what
   // quantisation alone produces. Believing it too readily and not at all are both visible here.
-  'wide slow arc': { gain: 0.36, size: 0.45, over: 4.5, late: 15, kick: 0, back: 0, still: 0, lead: 15, jump: 8 },
+  'wide slow arc': {
+    gain: 0.36,
+    size: 0.45,
+    over: 4.5,
+    late: 15,
+    kick: 0,
+    back: 0,
+    still: 0,
+    lead: 15,
+    jump: 8,
+    kept: 30,
+  },
 
   // Reversals. Nothing in a window says a turn is coming when the hand is at its fastest, so the guess is
   // bounded by how long this hand has lately been going between turning round rather than by evidence.
   // Gain over 1 is honest here: there is nothing to win, and the job is not to lose much.
-  zigzag: { gain: 1.06, size: 15, over: 20, late: 75, kick: 30, back: 90, still: 0, lead: 30, jump: 35 },
-  'shake, 8Hz': { gain: 1.11, size: 9, over: 45, late: 50, kick: 30, back: 200, still: 40, lead: 15, jump: 40 },
+  zigzag: { gain: 1.03, size: 15, over: 20, late: 75, kick: 30, back: 85, still: 0, lead: 30, jump: 35, kept: 25 },
+  'shake, 8Hz': {
+    gain: 1.1,
+    size: 9,
+    over: 45,
+    late: 50,
+    kick: 30,
+    back: 200,
+    still: 40,
+    lead: 15,
+    jump: 40,
+    kept: 30,
+  },
   'shake, fast and small': {
     gain: 1.11,
-    size: 6,
+    size: 5.5,
     over: 30,
     late: 30,
     kick: 25,
     back: 350,
     still: 55,
-    lead: 5.5,
+    lead: 6.5,
     jump: 25,
+    kept: 20,
   },
   'overshoot and correct': {
     gain: 0.55,
@@ -155,16 +362,61 @@ const LIMITS: Record<string, Limits> = {
     still: 35,
     lead: 65,
     jump: 45,
+    kept: 65,
   },
-  'target acquire': { gain: 0.54, size: 20, over: 40, late: 100, kick: 20, back: 20, still: 30, lead: 75, jump: 55 },
+  'target acquire': {
+    gain: 0.54,
+    size: 20,
+    over: 40,
+    late: 100,
+    kick: 20,
+    back: 20,
+    still: 30,
+    lead: 75,
+    jump: 55,
+    kept: 85,
+  },
   // Braking is believed on thin evidence and acted on at once, which is right for a stop and is exactly
   // wrong for a hand that is only pausing between two throws. This is the case that pays for that choice.
-  'double flick': { gain: 0.55, size: 25, over: 40, late: 150, kick: 20, back: 50, still: 45, lead: 85, jump: 65 },
+  'double flick': {
+    gain: 0.55,
+    size: 25,
+    over: 40,
+    late: 150,
+    kick: 20,
+    back: 50,
+    still: 45,
+    lead: 85,
+    jump: 65,
+    kept: 200,
+  },
 
   // A hand is never still. The wobble is the size of the counts underneath it, which is where a second
   // derivative reads it as motion and a caller keeping the growth turns it into rotation.
-  'tremor on a drag': { gain: 0.39, size: 2, over: 5.5, late: 15, kick: 0.25, back: 2, still: 0, lead: 15, jump: 15 },
-  'tremor at rest': { gain: 1.06, size: 2, over: 2.5, late: 3.5, kick: 2, back: 4.5, still: 15, lead: 1.5, jump: 2 },
+  'tremor on a drag': {
+    gain: 0.39,
+    size: 2,
+    over: 5.5,
+    late: 15,
+    kick: 0.25,
+    back: 1.5,
+    still: 0,
+    lead: 15,
+    jump: 15,
+    kept: 35,
+  },
+  'tremor at rest': {
+    gain: 1.06,
+    size: 2,
+    over: 2.5,
+    late: 3.5,
+    kick: 2,
+    back: 4.5,
+    still: 15,
+    lead: 1.5,
+    jump: 2,
+    kept: 2,
+  },
 }
 
 describe('movement shapes', () => {
@@ -197,6 +449,7 @@ describe('movement shapes', () => {
       // can only ever be pushed further along.
       expect(worst.worstJump).toBeLessThanOrEqual(limits.jump)
       expect(worst.worstRatchetJump).toBeLessThanOrEqual(limits.jump)
+      expect(worst.kept).toBeLessThanOrEqual(limits.kept)
     })
   }
 
@@ -255,6 +508,28 @@ describe('raising the lead does not throw a small circle apart', () => {
       const four = worstAcross(DEVICES, { path: circle(r, periodMs), durationMs: 3000, leadFrames: 4 })
       expect(Math.abs(four.meanRadius - r)).toBeLessThan(Math.abs(one.meanRadius - r) + 1.5)
       expect(four.worstJump).toBeLessThan(one.worstJump * 1.15 + 1)
+    }
+  })
+
+  test('a medium circle is drawn on the circle, at every speed a hand draws one at', () => {
+    // The one a hand actually makes: 120px across, at everything from a quick loop to a slow deliberate one.
+    // The guess used to sit well outside it in the middle of that range — 20px out at 600ms a lap on a
+    // trackpad, and the marker visibly orbiting outside the path the hand drew.
+    //
+    // The cause was two gates multiplying. The turn is read from two chords, which is a good measurement
+    // even on a thin window, and it was then multiplied by how far the *parabola* was believed — a worse
+    // measurement of the same thing, and one that sits near half on a window holding four samples. Two
+    // half-open gates left the arc bending at a quarter of the rate the hand was turning, and a lead that
+    // lags the heading on a circle points outwards, which is exactly where the marker was.
+    //
+    // So the turn is judged on its own evidence now, and that evidence is the average of several readings
+    // rather than one: a hand going round turns the same way on every frame while quantisation flips, so
+    // averaging keeps the turn whole and takes the noise down with the root of how many independent windows
+    // went into it.
+    const DRIFT: Record<number, number> = { 300: 3, 400: 2, 600: 5, 900: 13, 1400: 9 }
+    for (const periodMs of [300, 400, 600, 900, 1400]) {
+      const run = worstAcross(DEVICES, { path: circle(120, periodMs), durationMs: 4000 })
+      expect(Math.abs(run.meanRadius - 120)).toBeLessThan(DRIFT[periodMs]!)
     }
   })
 

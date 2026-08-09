@@ -264,6 +264,13 @@ The rest is mostly about not believing noise:
   grew a fifth on it, which is the one frame the eye gets before freshness starts discounting it.
 - **A hitch is not a change of refresh interval**, and the age of the newest sample is averaged rather than
   taken raw — a few milliseconds of horizon is pixels of lead on a hand doing nothing new.
+- **The turn is believed on its own evidence, and on several readings of it.** It used to be gated by how far
+  the parabola was believed as well — a worse measurement of the same thing, which sits near a half on a
+  window holding four samples. Two half-open gates left the arc bending at a quarter of the rate the hand was
+  turning, and a lead that lags the heading on a circle points outwards: the guess orbited 20px outside a
+  120px circle. Averaging the readings before judging them is more evidence rather than a lower bar — a hand
+  going round turns the same way on every frame and quantisation flips sign — and a reading that contradicts
+  a turn already believed is taken at once, because a hand can start going round the other way.
 - **Nor further ahead than the path turns a quarter circle over.** Past that the answer is mostly the turn
   rate — the noisiest thing in the fit — and the chord being asked for has stopped growing with the horizon
   and started coming back towards the hand, so a wobble in the rate moves the guess around the circle rather

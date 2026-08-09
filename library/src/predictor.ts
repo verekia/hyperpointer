@@ -33,6 +33,18 @@
 // the heading of the window's newer half against its older half is just two chords. The arc degenerates to
 // the straight line as the turn rate goes to zero, so straight motion is bit-identical.
 //
+// **The turn is believed on its own evidence, and on several readings of it.** It used to be multiplied by
+// how far the parabola was believed as well, which is a worse measurement of the same thing — on a window
+// holding four samples it sits near a half — and two half-open gates left the arc bending at a quarter of
+// the rate the hand was turning. A lead that lags the heading on a circle points outwards, so that is a
+// marker orbiting outside the circle the hand drew: 20px outside a 120px one.
+//
+// What replaced it is more evidence rather than a lower bar. A hand going round turns the same way on every
+// frame while quantisation flips sign, so the readings are averaged before they are judged, and the noise on
+// the average falls with the root of how many independent windows went into it. A reading that contradicts a
+// turn already believed is taken at once instead, because a hand can start going round the other way and
+// averaging across that says it is doing neither.
+//
 // **And the horizon is bounded by how far the path turns over it.** Past about a quarter turn the answer is
 // mostly the turn rate, which is the noisiest thing here, and the chord being asked for has stopped growing
 // with the horizon and started coming back towards the hand — so a wobble in the rate moves the guess around
@@ -100,6 +112,11 @@ const SURE_PX_PER_MS = 0.25
 // in full. Both are the same question asked of a different part of the fit.
 const CURVE_SNR = 2
 const TURN_SNR = 2
+// How far a chord's heading typically misses by, per count of quantisation at each of its ends, as a
+// fraction of the furthest it could ever miss by. A position on a grid is off by a twelfth of a count in
+// variance, which works out at about four tenths of the worst case; a twentieth above that is where a
+// stalled frame's noise starts being believed as a turn, so this sits just the safe side of it.
+const TURN_NOISE = 0.5
 // A guess that bends further than this over one horizon is not a turn a hand makes; it is a fit that has
 // run away.
 const MAX_TURN_RAD = Math.PI / 2
@@ -113,6 +130,11 @@ const MAX_TURN_RAD = Math.PI / 2
 const MAX_TRUSTED_TURN_RAD = Math.PI / 4
 // How long to settle the turn rate the cap above is read from.
 const TURN_RATE_MS = 100
+// How long the turn readings are averaged over before they are believed. Long enough for the average to be
+// worth more than one reading, short enough to follow a hand that changes which way it is going round.
+const TURN_TRUST_MS = 120
+// And how quickly it gives way when the path starts turning the other way instead.
+const TURN_CHANGE_MS = 30
 // How sharply the horizon gives way once the path turns further than that over it.
 const TURN_CAP_KNEE = 4
 // How far off a chord that ends on whole counts can point, and the unit every noise floor below is written
@@ -292,6 +314,7 @@ export const createPointerPredictor = (options: PredictorOptions = {}) => {
   // how fast the path has lately been turning, which is what bounds how far ahead the turn may be trusted.
   let carriedTurn = 0
   let turnRate = 0
+  let turnAverage = 0
   // A hand that has lately been doubling back, and how long it went between doing so. At the moment a
   // shake is fastest it is locally indistinguishable from a hand crossing the pad: same speed, and no
   // acceleration, because the turn is still ahead. Only the memory that it turned round a moment ago
@@ -598,10 +621,47 @@ export const createPointerPredictor = (options: PredictorOptions = {}) => {
         // it is a flat tax: it removes as much from a turn a hand really made as from one only the counts
         // made up, and on a circle a hand does make that came to a third of the turn — which is most of
         // why the guess used to sit outside the circle.
-        const floor = countPx * (1 / newLength + 1 / oldLength)
+        // Not the worst a count can do to a chord's heading, which is what this used to be, but what it does
+        // typically: a position quantised to a grid is off by a twelfth of a count in variance, so a chord
+        // with a count of grid at each end points about four tenths of a count over its length away from
+        // where it really points. The worst case is two and a half times that, and using it as the divisor
+        // of a signal-to-noise ratio asked for a five-sigma turn before believing one — which a 120px circle
+        // at a comfortable speed does not produce, and it was left sitting outside the circle for it.
+        const floor = TURN_NOISE * countPx * (1 / newLength + 1 / oldLength)
         const angle = Math.atan2(cross, dot)
-        const believed = floor > 0 ? Math.max(0, Math.min(1, (Math.abs(angle) / floor - 1) / (TURN_SNR - 1))) : 0
-        turn = (angle / (span / 2)) * believed * curveTrust
+
+        // One reading a frame, and a noisy one. What separates a hand going round from a path of whole
+        // counts that only looks like it is going round is not how big any single reading was — a slow drag
+        // throws up ninety degrees of apparent turn from nothing at all — it is that a real turn goes the
+        // same way on every frame and a made-up one flips. So the readings are averaged before they are
+        // judged: a circle keeps its whole rate through that, quantisation averages to nothing, and the
+        // noise on what is left falls by the root of how many independent windows went into it.
+        //
+        // Windows overlap, so frames are not independent readings; only a window's worth of new samples is.
+        // That is what the count below is, and it is the whole of why this is more evidence rather than a
+        // lower bar.
+        const rate = angle / (span / 2)
+        const independent = Math.max(1, TURN_TRUST_MS / WINDOW_MS)
+        const floorRate = floor / (span / 2) / Math.sqrt(independent)
+        // A reading that disagrees with a turn already worth believing is news rather than noise, and is
+        // taken far sooner — the same asymmetry braking gets, for the same reason: a hand can stop going
+        // round one way and start going round the other, and averaging across that says it is doing neither.
+        // A figure eight does it twice a lap, and carrying the old way across each one rotated the lead
+        // against the hand for a tenth of a second at a time, which a caller keeping the growth keeps.
+        //
+        // The test is against a turn that was believed, not against zero, or a straight path — whose
+        // readings flip sign every frame and mean nothing — would take the quick road every time and the
+        // average would follow the noise it is there to cancel.
+        const contradicts = rate * turnAverage < 0 && Math.abs(turnAverage) > floorRate
+        turnAverage += (rate - turnAverage) * (1 - Math.exp(-deltaMs / (contradicts ? TURN_CHANGE_MS : TURN_TRUST_MS)))
+        const believed =
+          floorRate > 0 ? Math.max(0, Math.min(1, (Math.abs(turnAverage) / floorRate - 1) / (TURN_SNR - 1))) : 0
+        // Not gated by how far the parabola is believed as well. The chords are measured off the path
+        // precisely because the parabola fits an arc badly, and on a window holding four samples the
+        // parabola is the weaker of the two — letting it veto the stronger left the arc bending at a quarter
+        // of the rate the hand was turning, which on a circle is a lead that lags the heading, and a lead
+        // that lags on a circle points outwards. That is the marker sitting outside the circle.
+        turn = turnAverage * believed
         carriedTurn = turn
       }
     }
@@ -870,6 +930,7 @@ export const createPointerPredictor = (options: PredictorOptions = {}) => {
     msSinceReversal = 1e4
     reversalPeriodMs = 1e4
     turnRate = 0
+    turnAverage = 0
     // What a count is worth is not part of the session. It is a property of the device, it does not change
     // across a menu, and dropping it would put the noise floors back to assuming pixels for the first half
     // second after every unlock — which is exactly when the hand is moving again.

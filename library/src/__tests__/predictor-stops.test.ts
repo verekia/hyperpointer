@@ -311,7 +311,11 @@ describe('turning is not stopping', () => {
     // most of it on any device slower than a wired mouse is the device reporting in clumps rather than
     // anything the corner did — so what a corner may add is measured against the same hand going straight.
     // The figure is what the corner is worth on top of that, and it is small.
-    const ADDED: Record<string, number> = { wired: 9, trackpad: 6, bluetooth: 4, 'slow radio': 13 }
+    // Believing a turn on the evidence of the chords alone rather than on the parabola's as well — which is
+    // what keeps the guess on a medium circle — makes the swing round a corner more energetic, and these
+    // went up by a few pixels for it. It buys 16px of drift off a 120px circle, which is a shape a hand
+    // makes far more often than it makes a right angle at 2.5px/ms.
+    const ADDED: Record<string, number> = { wired: 12, trackpad: 15, bluetooth: 4, 'slow radio': 17 }
     for (const device of DEVICES) {
       const turning = replay({ path: corner(90), device, durationMs: 1400 })
       const straight = replay({ path: piecewise([glide(2.5, 0, 1600)]), device, durationMs: 1400 })
