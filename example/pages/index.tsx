@@ -10,8 +10,9 @@ import {
 
 import Head from 'next/head'
 
-// Cursor-to-photon rig. Markers chase the OS cursor so a slow-motion recording can measure the gap to it,
-// which is the only way to see presentation latency — no clock inside the page can observe it.
+// Cursor-to-photon rig. Markers chase the OS pointer — drawn here as a white dot, see CURSOR_DOT_RADIUS —
+// so a slow-motion recording can measure the gap to it, which is the only way to see presentation latency:
+// no clock inside the page can observe it.
 //
 // Getting the input position is not the problem: the frame asked for at one refresh is presented one to
 // four refreshes later, and the hand has moved by then. Prediction is the only thing that closes that, and
@@ -72,6 +73,30 @@ const COMPARE_COLOURS: [number, number, number][] = [
   [0.4, 0.7, 1],
 ]
 const RING_RADII = [11, 16]
+
+// The OS pointer, re-skinned as a white dot a little inside the green ring's radius.
+//
+// It is still the OS pointer: a cursor image is handed to the window server and drawn by the compositor at
+// the true position, exactly as the arrow was, so it stays the one thing in the frame that is never late.
+// Drawing a dot into the canvas instead would draw it at the *reported* position, which is the red square —
+// the lag this page exists to show would vanish along with the reference for it.
+//
+// An arrow is a bad shape to judge alignment against: it is not centred on the position it means, so the
+// eye compares a corner to a circle and the answer depends on which way the arrow points. A dot centred on
+// the hotspot is the same shape as the markers chasing it, and a slow-motion frame reads as the dot being
+// inside the ring, on its edge, or outside it. Smaller than the ring so that the two never touch when they
+// agree, which is what makes the gap between them readable at all.
+const CURSOR_DOT_RADIUS = 8
+const cursorDot = () => {
+  const size = CURSOR_DOT_RADIUS * 2 + 4
+  const centre = size / 2
+  const svg =
+    `<svg xmlns='http://www.w3.org/2000/svg' width='${size}' height='${size}'>` +
+    `<circle cx='${centre}' cy='${centre}' r='${CURSOR_DOT_RADIUS}' fill='white'/></svg>`
+  // Falls back to the ordinary arrow rather than to nothing: a rig with no pointer at all is worse than one
+  // with the wrong pointer, and `none` is what the hide button is for.
+  return `url("data:image/svg+xml,${encodeURIComponent(svg)}") ${centre} ${centre}, default`
+}
 
 // Number(null) is 0, so an absent parameter has to be checked for rather than converted — otherwise every
 // default silently reads as zero.
@@ -398,7 +423,10 @@ const Rig = ({ compare, measure, leadFrames, capPx, hideCursor, hideReported, hi
   }, [compare, measure, leadFrames, capPx, hideReported, hidePredicted])
 
   return (
-    <div className={`flex h-screen flex-col bg-neutral-900 text-sm text-white ${hideCursor ? 'cursor-none' : ''}`}>
+    <div
+      className={`flex h-screen flex-col bg-neutral-900 text-sm text-white ${hideCursor ? 'cursor-none' : ''}`}
+      style={hideCursor ? undefined : { cursor: cursorDot() }}
+    >
       <div className="flex flex-wrap items-center gap-2 p-2">
         <span className="flex items-center gap-1">
           {[0, 1, 2, 3, 4].map(frames => (
@@ -434,9 +462,10 @@ const Rig = ({ compare, measure, leadFrames, capPx, hideCursor, hideReported, hi
           CLAMPED
         </span>
 
-        {/* The OS cursor is drawn by the compositor, not by the page, so it is always at the true position
-            and never late. Hiding it leaves only the two markers, which is what a slow-motion recording
-            needs to read the lead on its own; showing it is what measures the lag against the truth. */}
+        {/* The OS pointer — the white dot — is drawn by the compositor, not by the page, so it is always at
+            the true position and never late. Hiding it leaves only the two markers, which is what a
+            slow-motion recording needs to read the lead on its own; showing it is what measures the lag
+            against the truth. */}
         <button
           onClick={() => setParam('compare', compare ? '0' : '1')}
           className={`rounded px-2 py-1 ${compare ? 'bg-emerald-600' : 'bg-white/15'}`}
@@ -455,7 +484,7 @@ const Rig = ({ compare, measure, leadFrames, capPx, hideCursor, hideReported, hi
           onClick={() => setParam('nocursor', hideCursor ? '0' : '1')}
           className={`rounded px-2 py-1 ${hideCursor ? 'bg-emerald-600' : 'bg-white/15'}`}
         >
-          hide OS cursor
+          hide pointer dot
         </button>
 
         {/* The legend doubles as the switch for each marker: a marker on its own against the OS cursor is
@@ -503,9 +532,10 @@ const Rig = ({ compare, measure, leadFrames, capPx, hideCursor, hideReported, hi
       </div>
 
       <p className="px-2 pb-2 text-xs text-white/40">
-        Move the pointer around. The red square is where the browser says it is; the green circle is where hyperpointer
-        thinks it will be by the time this frame reaches the screen. They should sit on top of each other when the hand
-        is still, and the circle should sit on the OS cursor while it moves.
+        Move the pointer around. The white dot is the OS pointer, drawn by the compositor and never late; the red square
+        is where the browser says it is; the green circle is where hyperpointer thinks it will be by the time this frame
+        reaches the screen. All three should sit on top of each other when the hand is still, and the circle should stay
+        around the dot while it moves.
       </p>
 
       {measure && capture && (

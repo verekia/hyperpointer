@@ -20,10 +20,38 @@
 // the inward part of the guess, which is why circling used to throw the lead outwards. In 2D none of them
 // fire, because a circling hand never slows and never turns around. It turns.
 //
+// The same mistake waits one level in, where the path is split into along and across. Along the heading
+// alone a corner and a stop are again the same event — the speed the hand had is going away — and a corner
+// takes it away harder and sooner than any stop does, so a hand turning a right angle at speed had the
+// guess asked for nothing at all on the frame the corner entered the window. The answer is the same as
+// before: look at the other axis. A hand coming to a stop pushes straight back along its path; a hand
+// turning pushes sideways, and through a right angle a hundredth of the bend pointed back along the path
+// and the rest of it across.
+//
 // So the extrapolation follows an arc rather than a straight line. Speed and heading come from the fit;
 // the turn rate is measured off the path, because over a wide arc a parabola fits the curvature badly but
 // the heading of the window's newer half against its older half is just two chords. The arc degenerates to
 // the straight line as the turn rate goes to zero, so straight motion is bit-identical.
+//
+// **The turn is believed on its own evidence, and on several readings of it.** It used to be multiplied by
+// how far the parabola was believed as well, which is a worse measurement of the same thing — on a window
+// holding four samples it sits near a half — and two half-open gates left the arc bending at a quarter of
+// the rate the hand was turning. A lead that lags the heading on a circle points outwards, so that is a
+// marker orbiting outside the circle the hand drew: 20px outside a 120px one.
+//
+// What replaced it is more evidence rather than a lower bar. A hand going round turns the same way on every
+// frame while quantisation flips sign, so the readings are averaged before they are judged, and the noise on
+// the average falls with the root of how many independent windows went into it. A reading that contradicts a
+// turn already believed is taken at once instead, because a hand can start going round the other way and
+// averaging across that says it is doing neither.
+//
+// **And the horizon is bounded by how far the path turns over it.** Past about a quarter turn the answer is
+// mostly the turn rate, which is the noisiest thing here, and the chord being asked for has stopped growing
+// with the horizon and started coming back towards the hand — so a wobble in the rate moves the guess around
+// the circle rather than along it. Unbounded, a hand stirring a small circle quickly came apart as the lead
+// setting went up: at three refreshes the guess sat 58px off a 25px circle, two diameters from anywhere the
+// hand goes. Bounded, the answer stops growing with the setting instead of getting worse with it — what a
+// longer lead cannot buy, it no longer spends.
 //
 // Freshness is the only stop signal once the hand has already stopped. A stopped pointer sends nothing, so
 // the lead fades out over STOP_MS rather than sailing on at the last fitted speed.
@@ -54,6 +82,14 @@
 // most, while a steady drag looks thick when there is no bend there to find. Asking how far the bend
 // stands above the noise instead is both more accurate and steadier, and it is the same question whatever
 // the device: a hand crossing a mouse pad reads the same on a wired mouse and one on a radio.
+//
+// **What a count is worth is measured, not assumed.** Every one of those floors is written in units of one
+// count, and one count is a pixel only on a mouse at ordinary sensitivity — a low-DPI one steps four, and so
+// does anything scaled on the way through by the OS or by a page that is not at a device pixel ratio of 1.
+// Assumed, that put every floor four times too low on such a device and its staircase was believed as
+// motion. So the count is read off the deltas, which are the only thing that knows: every delta is a whole
+// number of counts, so the grid they sit on is their greatest common divisor, and unlike every other
+// statistic to hand that reading does not confuse a coarse device with a fast hand.
 
 import type { PointerFrame } from './pointer.js'
 
@@ -76,12 +112,56 @@ const SURE_PX_PER_MS = 0.25
 // in full. Both are the same question asked of a different part of the fit.
 const CURVE_SNR = 2
 const TURN_SNR = 2
+// How far a chord's heading typically misses by, per count of quantisation at each of its ends, as a
+// fraction of the furthest it could ever miss by. A position on a grid is off by a twelfth of a count in
+// variance, which works out at about four tenths of the worst case; a twentieth above that is where a
+// stalled frame's noise starts being believed as a turn, so this sits just the safe side of it.
+const TURN_NOISE = 0.5
 // A guess that bends further than this over one horizon is not a turn a hand makes; it is a fit that has
 // run away.
 const MAX_TURN_RAD = Math.PI / 2
-// About one mouse count, which is how far off a chord that ends on whole counts can point. Used to work out
-// how much of a measured turn is quantisation before any of it is believed.
+// And how far the path may turn over the horizon before the horizon itself is cut short. Past this the
+// answer is mostly the turn rate, which is the noisiest thing in the fit, and the chord being asked for has
+// stopped growing with the horizon and started coming back towards the hand — so a wobble in the rate moves
+// the guess around the circle rather than along it. Measured on small circles stirred quickly, which is
+// where one horizon is most of a lap: at a quarter turn the guess sat 9px off a 25px circle where trusting a
+// half turn put it 23px off and trusting the lot put it 58px off, two diameters from anywhere the hand goes.
+// Tighter than this starts costing an ordinary tight circle its lead, and buys little.
+const MAX_TRUSTED_TURN_RAD = Math.PI / 4
+// How long to settle the turn rate the cap above is read from.
+const TURN_RATE_MS = 100
+// How long the turn readings are averaged over before they are believed. Long enough for the average to be
+// worth more than one reading, short enough to follow a hand that changes which way it is going round.
+const TURN_TRUST_MS = 120
+// And how quickly it gives way when the path starts turning the other way instead.
+const TURN_CHANGE_MS = 30
+// How sharply the horizon gives way once the path turns further than that over it.
+const TURN_CAP_KNEE = 4
+// How far off a chord that ends on whole counts can point, and the unit every noise floor below is written
+// in: one count. What a count is worth in pointer pixels is the assumption, and it is only one pixel on a
+// mouse at ordinary sensitivity — a low-DPI one moves several, and so does any device whose counts are
+// scaled on the way through, by the OS or by a page that is not at a device pixel ratio of 1. Every floor is
+// then several times too low, and noise gets believed as motion: measured on a mouse reporting four pixels a
+// count, the guess swung 28 degrees of heading a frame on a dead straight path and led a crawl it should
+// have refused outright.
+//
+// So the count is measured rather than assumed, and the deltas are the only thing that knows. Every delta a
+// device reports is a whole number of counts, so the grid they all sit on is their greatest common divisor —
+// the one reading of it that does not care how fast the hand is going. A hand crossing the pad reports 5 and
+// 6 and 5, which share nothing but 1; the same hand on a low-DPI mouse reports 20 and 24 and 20, which share
+// 4. Sample counts, smallest deltas and every other obvious statistic all say "coarse device" and "fast
+// hand" with the same voice, and the difference is the whole point.
 const QUANTISATION_PX = 1
+// Long enough to hold a few dozen deltas of an ordinary drag, and two of them have to agree before the
+// floors move: over one window a hand can be regular enough that its deltas share a factor by luck, and
+// twice running it cannot. Learning therefore takes about half a second of motion, during which the counts
+// are assumed to be pixels, which is where they started.
+const COUNT_WINDOW_MS = 250
+// Wider than this is not a count size, it is a caller scaling deltas into something that is not pixels, and
+// the floors have no business following it there.
+const MAX_COUNT_PX = 16
+// Deltas are whole counts, so a remainder this far under one is the division coming out even.
+const COUNT_EPSILON = 0.05
 // How much a least-squares curvature wobbles for a given amount of that quantisation, over a window of a
 // given length and sample count. Tuned on a steady drag, where every bit of curvature read is noise.
 const ACCEL_NOISE = 20
@@ -143,6 +223,20 @@ const REVERSAL_HORIZON = 0.4
 // the two apart in advance. Shared, because the ramp and the compensation for the ramp's own lag have to be
 // talking about the same number or the correction is for a filter that is not there.
 const rampLength = (decayMs: number, confidence: number) => Math.max(decayMs * (1 + NOISE_EASE * (1 - confidence)), 1)
+
+/** Euclid, to a tolerance, because a count is not always a whole number of pixels either. The iteration
+ * count is bounded because a pair of deltas that do not converge is a pair to give up on rather than to keep
+ * dividing: falling back to a common divisor of one is the assumption this started from. */
+const sharedDivisor = (a: number, b: number) => {
+  let x = a
+  let y = b
+  for (let i = 0; i < 8 && y > COUNT_EPSILON; i++) {
+    const remainder = x % y
+    x = y
+    y = remainder
+  }
+  return y > COUNT_EPSILON ? QUANTISATION_PX : x
+}
 
 export type PredictorOptions = {
   /** How many display refreshes ahead to guess. This is a count of refreshes rather than a duration
@@ -216,8 +310,11 @@ export const createPointerPredictor = (options: PredictorOptions = {}) => {
   // previous speed to difference against, which is not the same as a previous speed of zero.
   let lastSpeed = -1
   let speedTrend = 0
-  // Believed turn rate of the path, rad/ms, so the eased lead can be carried around with the heading.
+  // Believed turn rate of the path, rad/ms, so the eased lead can be carried around with the heading, and
+  // how fast the path has lately been turning, which is what bounds how far ahead the turn may be trusted.
   let carriedTurn = 0
+  let turnRate = 0
+  let turnAverage = 0
   // A hand that has lately been doubling back, and how long it went between doing so. At the moment a
   // shake is fastest it is locally indistinguishable from a hand crossing the pad: same speed, and no
   // acceleration, because the turn is still ahead. Only the memory that it turned round a moment ago
@@ -226,11 +323,31 @@ export const createPointerPredictor = (options: PredictorOptions = {}) => {
   let headingY = 0
   let msSinceReversal = 1e4
   let reversalPeriodMs = 1e4
+  // What one count of this device is worth in pointer pixels, and the two windows of deltas behind that
+  // answer. Believed only as far as the assumption it replaces is safe: a device reporting finer than a
+  // pixel is quieter than the floors expect, which costs a little sensitivity and can break nothing, so
+  // this only ever moves them up.
+  let countPx = QUANTISATION_PX
+  let countThisWindow = 0
+  let countLastWindow = 0
+  let countWindowAt = -1
 
   const out: Lead = { x: 0, y: 0, live: 1 }
 
+  const observeCount = (delta: number) => {
+    const size = Math.abs(delta)
+    if (size < COUNT_EPSILON) return
+    countThisWindow = countThisWindow === 0 ? size : sharedDivisor(countThisWindow, size)
+  }
+
   /** One coalesced sample: when the motion happened, and how far it went on each axis. */
   const push = (timeStampMs: number, deltaX: number, deltaY: number) => {
+    // Once this window's deltas have nothing bigger than a pixel in common there is nothing left to learn
+    // from it, which is the case on every device that reports in pixels and costs them a comparison.
+    if (countThisWindow === 0 || countThisWindow > QUANTISATION_PX) {
+      observeCount(deltaX)
+      observeCount(deltaY)
+    }
     cumulativeX += deltaX
     cumulativeY += deltaY
     times[head] = timeStampMs
@@ -317,7 +434,14 @@ export const createPointerPredictor = (options: PredictorOptions = {}) => {
     // the hand is going lets every spike through amplified. Under a crawl the lead is dropped entirely —
     // a caller that keeps what it is given keeps every upward wobble too, so jitter at a slow steady
     // drag accumulates for as long as the drag lasts.
-    const travel = Math.hypot(travelX, travelY)
+    // Travel is only known to within a count, and the gate below is a speed tuned against a device whose
+    // counts are pixels — so the extra uncertainty of a wider one comes off the travel before it is read.
+    // Left in, a hand well under the gate reads several times over it on a low-DPI mouse whenever two counts
+    // happen to land close together, and a crawl gets led by a fit that is entirely staircase. Taking it off
+    // the travel rather than putting it on the threshold is what keeps an ordinary drag on that device led:
+    // four counts across a window are few enough that no curve can be fitted to them and plenty to say how
+    // fast the hand is going.
+    const travel = Math.max(0, Math.hypot(travelX, travelY) - (countPx - QUANTISATION_PX))
     const speed = span > 0 ? travel / span : 0
     const trust = Math.max(0, Math.min(1, (speed - SLOW_PX_PER_MS) / (SURE_PX_PER_MS - SLOW_PX_PER_MS)))
     if (trust === 0) return false
@@ -360,7 +484,7 @@ export const createPointerPredictor = (options: PredictorOptions = {}) => {
     // mouse looks exactly as thin as a slow device, and that is the moment the bend matters most.
     // How much a least-squares curvature wobbles for this much quantisation over a window this long and
     // this well populated. Every judgement about whether a bend is real is asked against it.
-    const bendFloor = (ACCEL_NOISE * QUANTISATION_PX) / (span * span * Math.sqrt(used))
+    const bendFloor = (ACCEL_NOISE * countPx) / (span * span * Math.sqrt(used))
     const measured =
       bendFloor > 0 ? Math.max(0, Math.min(1, (Math.hypot(bendX, bendY) / bendFloor - 1) / (CURVE_SNR - 1))) : 0
     // A bend sitting near its own noise floor answers this differently every frame, and the answer decides
@@ -409,6 +533,20 @@ export const createPointerPredictor = (options: PredictorOptions = {}) => {
     // going at a dead constant speed. Subtract what quantisation alone would produce, so constant speed
     // reads as constant and a flick still reads as a flick.
     const bendAlong = bendX * tx + bendY * ty
+    // How much of the bend is the hand slowing rather than the hand turning. Seen along the heading alone,
+    // a corner is indistinguishable from a stop: the speed in the direction the hand was going collapses,
+    // and it collapses harder and sooner than any real stop does. It is the same blind spot a per-axis fit
+    // has at the extremum of a circle, one level in — and it has the same answer, which is to look at the
+    // other axis. A hand coming to a stop pushes straight back along its path. A hand turning pushes
+    // sideways, and a corner is almost entirely sideways: measured through a right angle at speed, a
+    // hundredth of the bend pointed back along the path and the rest of it across.
+    //
+    // Where the bend is too small to have a direction at all this says nothing and must not be allowed to:
+    // below its own noise floor it reads as one, which leaves every device too thin to carry a curvature
+    // braking exactly as it did before. That is the case the speed trend exists for, and this may not take
+    // it away.
+    const bendMagnitude = Math.hypot(bendX, bendY)
+    const slowing = bendMagnitude > bendFloor ? Math.abs(bendAlong) / bendMagnitude : 1
     const alongRaw = bendAlong * curveTrust
     let alongAcceleration = Math.sign(alongRaw) * Math.max(0, Math.abs(alongRaw) - bendFloor)
 
@@ -420,7 +558,9 @@ export const createPointerPredictor = (options: PredictorOptions = {}) => {
     // Only ever taken when it brakes harder than the settled reading does, so this can subtract lead and
     // never add it: a stop is seen sooner or exactly as before, never later.
     const brakeMeasured =
-      bendAlong < 0 && bendFloor > 0 ? Math.max(0, Math.min(1, (-bendAlong / bendFloor - 1) / (CURVE_SNR - 1))) : 0
+      bendAlong < 0 && bendFloor > 0
+        ? Math.max(0, Math.min(1, (-bendAlong / bendFloor - 1) / (CURVE_SNR - 1))) * slowing
+        : 0
     brakeConfidence += (brakeMeasured - brakeConfidence) * (1 - Math.exp(-deltaMs / BRAKE_TRUST_MS))
     const brakeTrust = brakeConfidence
     if (bendAlong < 0) {
@@ -438,9 +578,13 @@ export const createPointerPredictor = (options: PredictorOptions = {}) => {
       speedTrend += ((speedNow - lastSpeed) / deltaMs - speedTrend) * (1 - Math.exp(-deltaMs / TREND_MS))
     }
     lastSpeed = speedNow
-    const trendFloor = (TREND_NOISE * QUANTISATION_PX) / (span * Math.sqrt(used) * TREND_MS)
+    const trendFloor = (TREND_NOISE * countPx) / (span * Math.sqrt(used) * TREND_MS)
+    // The fitted speed falls at a corner as surely as it falls at a stop, and for a reason that has nothing
+    // to do with the hand: the straight line through a window that bends is the chord of it, and a chord is
+    // shorter than the path. So this is held to the same question as the curvature above — through a right
+    // angle the fitted speed dropped by a third with the hand at a dead constant speed throughout.
     if (speedTrend < 0 && trendFloor > 0) {
-      const believed = Math.max(0, Math.min(1, (-speedTrend / trendFloor - 1) / (CURVE_SNR - 1)))
+      const believed = Math.max(0, Math.min(1, (-speedTrend / trendFloor - 1) / (CURVE_SNR - 1))) * slowing
       alongAcceleration = Math.min(alongAcceleration, speedTrend * believed)
     }
 
@@ -452,40 +596,6 @@ export const createPointerPredictor = (options: PredictorOptions = {}) => {
     // braking is believed beyond the settled reading, so nothing is subtracted twice.
     const givenUp = Math.min(0, curvedX * tx + curvedY * ty - (straightX * tx + straightY * ty))
     const speedAlong = Math.max(0, speedNow + givenUp * Math.max(0, brakeTrust - curveTrust))
-
-    // How hard to smooth the lead. Read off the bend alone this asks whether the path is straight, and
-    // answers a dead-steady cruise with the longest ramp there is — four times decayMs at the exact moment
-    // the hand is most likely to come off the flick and the target about to move faster than at any other
-    // time. What the ramp needs to know is whether there is anything to track, and braking is something to
-    // track whether or not the path bends, so a stop no longer has to drag the ramp along behind it.
-    confidence = Math.max(curveTrust, brakeTrust)
-    const rampMs = rampLength(decayMs, confidence)
-    // Never guess much further ahead than this hand has been going between turning round. Past that the
-    // guess is extrapolating through a reversal it has no way to see, and on a quick shake it ran further
-    // than the whole width of the motion.
-    let horizon = Math.min(horizonMs, reversalPeriodMs * REVERSAL_HORIZON)
-    if (alongAcceleration < 0 && speedAlong + alongAcceleration * horizon < 0) {
-      horizon = -speedAlong / alongAcceleration
-    }
-    // Where the hand will be, which is the ordinary kinematic answer.
-    const travelled = speedAlong * horizon + 0.5 * alongAcceleration * horizon * horizon
-
-    // The ramp is a first-order lag, so it trails whatever it is pointed at by its own time constant times
-    // however fast that target is genuinely moving. Into a stop the target falls at the braking rate over
-    // the horizon, and the trailing is worth more than everything else here put together: with the fit
-    // reading the stop correctly the target was down to 16px while the lead was still holding 37.
-    //
-    // How fast the target moves is not a mystery to be differentiated out of a noisy signal — the target is
-    // speed over the horizon, so it moves at the acceleration over the horizon, and the acceleration is
-    // already here and already gated. Pointing the ramp that far past the hand leaves it arriving on time.
-    // A hand at constant speed has no acceleration, so nothing is subtracted and none of the smoothing is
-    // given up where it is doing the work.
-    //
-    // Braking only. Compensating the same lag on the way up would be spending the smoothing exactly where
-    // it was bought — the noise a fit makes on a hand picking up speed is the thing the ramp is for, and
-    // trailing on the way up costs nothing worse than the lateness this whole library exists to remove.
-    const rampLag = alongAcceleration < 0 ? alongAcceleration * horizon * rampMs : 0
-    const distance = Math.max(0, travelled + rampLag)
 
     // Turn rate straight off the path: the heading of the newer half of the window against the heading of
     // its older half, which is two chords rather than a second derivative.
@@ -511,13 +621,105 @@ export const createPointerPredictor = (options: PredictorOptions = {}) => {
         // it is a flat tax: it removes as much from a turn a hand really made as from one only the counts
         // made up, and on a circle a hand does make that came to a third of the turn — which is most of
         // why the guess used to sit outside the circle.
-        const floor = QUANTISATION_PX * (1 / newLength + 1 / oldLength)
+        // Not the worst a count can do to a chord's heading, which is what this used to be, but what it does
+        // typically: a position quantised to a grid is off by a twelfth of a count in variance, so a chord
+        // with a count of grid at each end points about four tenths of a count over its length away from
+        // where it really points. The worst case is two and a half times that, and using it as the divisor
+        // of a signal-to-noise ratio asked for a five-sigma turn before believing one — which a 120px circle
+        // at a comfortable speed does not produce, and it was left sitting outside the circle for it.
+        const floor = TURN_NOISE * countPx * (1 / newLength + 1 / oldLength)
         const angle = Math.atan2(cross, dot)
-        const believed = floor > 0 ? Math.max(0, Math.min(1, (Math.abs(angle) / floor - 1) / (TURN_SNR - 1))) : 0
-        turn = (angle / (span / 2)) * believed * curveTrust
+
+        // One reading a frame, and a noisy one. What separates a hand going round from a path of whole
+        // counts that only looks like it is going round is not how big any single reading was — a slow drag
+        // throws up ninety degrees of apparent turn from nothing at all — it is that a real turn goes the
+        // same way on every frame and a made-up one flips. So the readings are averaged before they are
+        // judged: a circle keeps its whole rate through that, quantisation averages to nothing, and the
+        // noise on what is left falls by the root of how many independent windows went into it.
+        //
+        // Windows overlap, so frames are not independent readings; only a window's worth of new samples is.
+        // That is what the count below is, and it is the whole of why this is more evidence rather than a
+        // lower bar.
+        const rate = angle / (span / 2)
+        const independent = Math.max(1, TURN_TRUST_MS / WINDOW_MS)
+        const floorRate = floor / (span / 2) / Math.sqrt(independent)
+        // A reading that disagrees with a turn already worth believing is news rather than noise, and is
+        // taken far sooner — the same asymmetry braking gets, for the same reason: a hand can stop going
+        // round one way and start going round the other, and averaging across that says it is doing neither.
+        // A figure eight does it twice a lap, and carrying the old way across each one rotated the lead
+        // against the hand for a tenth of a second at a time, which a caller keeping the growth keeps.
+        //
+        // The test is against a turn that was believed, not against zero, or a straight path — whose
+        // readings flip sign every frame and mean nothing — would take the quick road every time and the
+        // average would follow the noise it is there to cancel.
+        const contradicts = rate * turnAverage < 0 && Math.abs(turnAverage) > floorRate
+        turnAverage += (rate - turnAverage) * (1 - Math.exp(-deltaMs / (contradicts ? TURN_CHANGE_MS : TURN_TRUST_MS)))
+        const believed =
+          floorRate > 0 ? Math.max(0, Math.min(1, (Math.abs(turnAverage) / floorRate - 1) / (TURN_SNR - 1))) : 0
+        // Not gated by how far the parabola is believed as well. The chords are measured off the path
+        // precisely because the parabola fits an arc badly, and on a window holding four samples the
+        // parabola is the weaker of the two — letting it veto the stronger left the arc bending at a quarter
+        // of the rate the hand was turning, which on a circle is a lead that lags the heading, and a lead
+        // that lags on a circle points outwards. That is the marker sitting outside the circle.
+        turn = turnAverage * believed
         carriedTurn = turn
       }
     }
+
+    // How hard to smooth the lead. Read off the bend alone this asks whether the path is straight, and
+    // answers a dead-steady cruise with the longest ramp there is — four times decayMs at the exact moment
+    // the hand is most likely to come off the flick and the target about to move faster than at any other
+    // time. What the ramp needs to know is whether there is anything to track, and braking is something to
+    // track whether or not the path bends, so a stop no longer has to drag the ramp along behind it.
+    confidence = Math.max(curveTrust, brakeTrust)
+    const rampMs = rampLength(decayMs, confidence)
+    // Never guess much further ahead than this hand has been going between turning round. Past that the
+    // guess is extrapolating through a reversal it has no way to see, and on a quick shake it ran further
+    // than the whole width of the motion.
+    let horizon = Math.min(horizonMs, reversalPeriodMs * REVERSAL_HORIZON)
+    // Nor further ahead than the path turns a quarter circle over. Past that the answer is mostly the turn
+    // rate — the noisiest thing in the fit — and the chord it is asking for has stopped growing with the
+    // horizon and started shrinking back towards the hand, so a wobble in the rate moves the guess about the
+    // circle rather than along it. It is the same rule as the reversal above, for a hand that is turning
+    // rather than doubling back, and it binds on exactly the case that has no answer: a small circle stirred
+    // quickly, where one horizon is most of a lap. Left uncapped the sweep was clamped to a quarter turn
+    // while the distance went on being the whole arc, so the guess left the circle altogether — 58px off a
+    // 25px circle at three frames of lead, which is two diameters away from any point the hand visits.
+    // Against a settled reading of the rate, not this frame's. Capping on the raw one hands the horizon the
+    // turn estimate's own frame-to-frame wobble, and a horizon that wobbles is a lead whose length wobbles,
+    // which is the picture moving backwards under the hand — 2.3px of it on a tight circle, which is the
+    // artefact this exists to remove rather than one to introduce. How fast a hand is going round changes
+    // over tenths of a second; the noise on reading it changes every frame.
+    turnRate += (Math.abs(turn) - turnRate) * (1 - Math.exp(-deltaMs / TURN_RATE_MS))
+    if (turnRate > 0) {
+      // Eased rather than cut, because a hard ceiling has a knee, and a path whose turn sits on the knee
+      // steps across it and back every frame. The shape below leaves a gentle turn alone, takes a sixth off
+      // at the point the cap is reached, and settles on the cap itself past it.
+      const sweep = (turnRate * horizon) / MAX_TRUSTED_TURN_RAD
+      horizon /= (1 + sweep ** TURN_CAP_KNEE) ** (1 / TURN_CAP_KNEE)
+    }
+    if (alongAcceleration < 0 && speedAlong + alongAcceleration * horizon < 0) {
+      horizon = -speedAlong / alongAcceleration
+    }
+    // Where the hand will be, which is the ordinary kinematic answer.
+    const travelled = speedAlong * horizon + 0.5 * alongAcceleration * horizon * horizon
+
+    // The ramp is a first-order lag, so it trails whatever it is pointed at by its own time constant times
+    // however fast that target is genuinely moving. Into a stop the target falls at the braking rate over
+    // the horizon, and the trailing is worth more than everything else here put together: with the fit
+    // reading the stop correctly the target was down to 16px while the lead was still holding 37.
+    //
+    // How fast the target moves is not a mystery to be differentiated out of a noisy signal — the target is
+    // speed over the horizon, so it moves at the acceleration over the horizon, and the acceleration is
+    // already here and already gated. Pointing the ramp that far past the hand leaves it arriving on time.
+    // A hand at constant speed has no acceleration, so nothing is subtracted and none of the smoothing is
+    // given up where it is doing the work.
+    //
+    // Braking only. Compensating the same lag on the way up would be spending the smoothing exactly where
+    // it was bought — the noise a fit makes on a hand picking up speed is the thing the ramp is for, and
+    // trailing on the way up costs nothing worse than the lateness this whole library exists to remove.
+    const rampLag = alongAcceleration < 0 ? alongAcceleration * horizon * rampMs : 0
+    const distance = Math.max(0, travelled + rampLag)
 
     const swept = Math.max(-MAX_TURN_RAD, Math.min(MAX_TURN_RAD, turn * horizon))
     let along = distance
@@ -550,6 +752,17 @@ export const createPointerPredictor = (options: PredictorOptions = {}) => {
     // handed over on the frame after every stall. Clamping what the average is allowed to see leaves a
     // real refresh change to walk there over a few frames and a stall to barely register.
     if (deltaMs > 0) frameMs += (Math.min(deltaMs, frameMs * MAX_FRAME_STEP) - frameMs) * FRAME_SMOOTHING
+
+    // What a count of this device is worth, settled a window at a time. A window that carried no motion has
+    // nothing to say and is simply extended, so a hand sitting still cannot make the answer expire.
+    if (countWindowAt < 0) countWindowAt = nowMs
+    else if (nowMs - countWindowAt >= COUNT_WINDOW_MS && countThisWindow > 0) {
+      const agreed = countLastWindow > 0 ? Math.min(countThisWindow, countLastWindow) : QUANTISATION_PX
+      countPx = Math.min(MAX_COUNT_PX, Math.max(QUANTISATION_PX, agreed))
+      countLastWindow = countThisWindow
+      countThisWindow = 0
+      countWindowAt = nowMs
+    }
 
     const newestT = count > 0 ? times[(head - 1 + CAPACITY) % CAPACITY]! : 0
     const hadInput = count > 0 && newestT > lastSeenNewest
@@ -716,6 +929,11 @@ export const createPointerPredictor = (options: PredictorOptions = {}) => {
     headingY = 0
     msSinceReversal = 1e4
     reversalPeriodMs = 1e4
+    turnRate = 0
+    turnAverage = 0
+    // What a count is worth is not part of the session. It is a property of the device, it does not change
+    // across a menu, and dropping it would put the noise floors back to assuming pixels for the first half
+    // second after every unlock — which is exactly when the hand is moving again.
   }
 
   return { push, pushFrame, update, reset }

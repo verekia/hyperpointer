@@ -223,6 +223,13 @@ window, the second differences first derivatives over several frames and still r
 its own noise. Whichever brakes harder wins, so a thick window is unaffected and a thin one gets a stop it
 would otherwise never have seen.
 
+**A corner is not a stop, and telling them apart needs the other axis.** Along the heading the hand was
+going, a corner takes its speed away faster than any stop does — so braking, which is deliberately believed
+on thin evidence and acted on at once, fires on a hand that has not slowed by a pixel per second. What
+separates them is where the bend points: a hand coming to a stop pushes straight back along its path, and a
+hand turning pushes sideways. Through a right angle at speed, a hundredth of the bend pointed back along the
+path and the rest of it across.
+
 **Most of the overshoot was never in the fit — it was the ramp behind it.** A first-order lag trails its
 target by its own time constant times how fast that target is moving, and coming off a flick the target falls
 faster than at any other time. That lag is a known quantity rather than something to be differentiated out of
@@ -234,6 +241,13 @@ The rest is mostly about not believing noise:
 
 - **Below a crawl there is no lead at all.** Whole mouse counts are all a slow hand produces, and a fit over
   four of them is mostly quantisation.
+- **What a count is worth is measured, not assumed.** Every noise floor is written in units of one count, and
+  a count is one pixel only on a mouse at ordinary sensitivity — a low-DPI one steps four, and so does
+  anything the OS or a device pixel ratio scales on the way through. Assumed, that put every floor four times
+  too low on such a device: it swung the guess 28° of heading a frame on a dead straight path and led a crawl
+  it should have refused. The deltas are the only thing that knows, and every delta is a whole number of
+  counts — so the grid they sit on is their greatest common divisor, which is the one reading of it that does
+  not mistake a coarse device for a fast hand.
 - **The parabola is believed only as far as the bend stands above the noise floor** — how hard a path of
   whole counts appears to bend when it is dead straight — and slides back to the straight line as that
   margin closes. Sample count is the wrong question: it counts the samples that carried motion, so a fast
@@ -250,21 +264,69 @@ The rest is mostly about not believing noise:
   grew a fifth on it, which is the one frame the eye gets before freshness starts discounting it.
 - **A hitch is not a change of refresh interval**, and the age of the newest sample is averaged rather than
   taken raw — a few milliseconds of horizon is pixels of lead on a hand doing nothing new.
+- **The turn is believed on its own evidence, and on several readings of it.** It used to be gated by how far
+  the parabola was believed as well — a worse measurement of the same thing, which sits near a half on a
+  window holding four samples. Two half-open gates left the arc bending at a quarter of the rate the hand was
+  turning, and a lead that lags the heading on a circle points outwards: the guess orbited 20px outside a
+  120px circle. Averaging the readings before judging them is more evidence rather than a lower bar — a hand
+  going round turns the same way on every frame and quantisation flips sign — and a reading that contradicts
+  a turn already believed is taken at once, because a hand can start going round the other way.
+- **Nor further ahead than the path turns a quarter circle over.** Past that the answer is mostly the turn
+  rate — the noisiest thing in the fit — and the chord being asked for has stopped growing with the horizon
+  and started coming back towards the hand, so a wobble in the rate moves the guess around the circle rather
+  than along it. Unbounded, a hand stirring a small circle came apart as `leadFrames` went up: at three
+  refreshes of lead the guess sat 58px off a 25px circle. Bounded, it reads the same at one refresh and at
+  four.
 - **The guess is never led past its own reversal.** A quick shake turns round before the horizon is out, and
   at the moment it is fastest there is no acceleration to give the turn away.
 
 ## The rig
 
-`example/` is a cursor-to-photon rig: markers chase the OS cursor so a slow-motion recording can measure the
+`example/` is a cursor-to-photon rig: markers chase the OS pointer so a slow-motion recording can measure the
 gap to it. That is the only way to see presentation latency — no clock inside the page can observe it.
 
 ```bash
 bun i && bun dev
 ```
 
-The red square is the reported position, the green circle is the prediction, and the OS cursor is the truth
-(the compositor draws it, so it is never late). `?compare=1` shows two leads at once; `?nocursor=1`,
-`?noreported=1` and `?nopredicted=1` strip the frame down to what you want to read.
+The red square is the reported position, the green circle is the prediction, and the white dot is the truth:
+it is the OS pointer wearing a cursor image, so the compositor still draws it and it is still never late — an
+arrow is simply a poor shape to judge a circle against, being pointed rather than centred on the position it
+means. `?compare=1` shows two leads at once; `?nocursor=1`, `?noreported=1` and `?nopredicted=1` strip the
+frame down to what you want to read.
+
+## Changing the prediction
+
+The rig above is the only way to see presentation latency, and it needs a hand, a camera and an afternoon.
+Everything else is measured off a replay instead, so the fit can be changed and judged without one:
+
+```bash
+bun test                       # 30 shapes × 9 devices, against floors that were measured
+bun run bench                  # the same runs, printed as numbers
+bun run bench circle --all     # one family of shapes, on every device
+bun run bench --save before.json
+bun run bench --diff before.json   # what your change actually moved, marked ↓ better ↑ worse
+```
+
+A hand moves along a known path, a modelled device reports it in whole counts at its own rate and with its
+own clock wander, a frame loop reads the lead back out, and the run is scored against where the hand really
+is when each frame reaches the screen. Both ends are modelled because both ends matter: a wired mouse and one
+on a radio are different problems, and so are 60Hz and 144Hz.
+
+The shapes are in `library/src/__tests__/harness.ts` — steady drags from a crawl to a whip, flicks stopping
+in anywhere from 40ms to 400ms, circles, figure eights, spirals, corners taken sharp and round, shakes,
+zigzags, target acquisition, tremor, and stops and starts between all of them. Add one there and the
+scoreboard picks it up; the shapes suite will then fail until it is given a floor, which is the point.
+
+What is scored, per run: how far past the hand the guess ever sat and how far behind, how much the picture
+moved against the hand or moved at all while the hand was still, how far the guess jumped in a frame, and the
+error against the error of not guessing at all. Overshooting and falling short are never added together —
+lead that was never needed has to be handed back, and handing it back walks the view backwards under the
+hand, where lead that was never taken is only the lateness the library exists to remove.
+
+Every figure in a test was read off that rig and given about a quarter more room. **Improve one and tighten
+it in the same change**, or the floor stops being a floor. Most changes trade one column for another; the
+`--diff` output is there so the trade is visible rather than discovered later on somebody's desk.
 
 ## License
 
