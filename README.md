@@ -223,6 +223,13 @@ window, the second differences first derivatives over several frames and still r
 its own noise. Whichever brakes harder wins, so a thick window is unaffected and a thin one gets a stop it
 would otherwise never have seen.
 
+**A corner is not a stop, and telling them apart needs the other axis.** Along the heading the hand was
+going, a corner takes its speed away faster than any stop does — so braking, which is deliberately believed
+on thin evidence and acted on at once, fires on a hand that has not slowed by a pixel per second. What
+separates them is where the bend points: a hand coming to a stop pushes straight back along its path, and a
+hand turning pushes sideways. Through a right angle at speed, a hundredth of the bend pointed back along the
+path and the rest of it across.
+
 **Most of the overshoot was never in the fit — it was the ramp behind it.** A first-order lag trails its
 target by its own time constant times how fast that target is moving, and coming off a flick the target falls
 faster than at any other time. That lag is a known quantity rather than something to be differentiated out of

@@ -11,6 +11,7 @@
 // the figure measured on the next machine. Any number in a test file was read off this rig and given room.
 
 import { createPointerPredictor, DEFAULT_DECAY_MS, DEFAULT_LEAD_FRAMES, DEFAULT_MAX_LEAD_PX } from '../predictor.js'
+import { createLeadRatchet } from '../ratchet.js'
 
 export const FRAME = 16.7
 /** What the newest sample's age measures at at 60Hz, per the example rig. */
@@ -167,6 +168,18 @@ export type Metrics = {
    * direction. A guess still holding lead when the hand stops has to give every pixel of it back, and this
    * is what that costs. */
   phantom: number
+  /** How unevenly the picture moves, in pixels: the worst frame's difference between how far the picture
+   * travelled and how far it should have. A hand at a constant speed makes a picture that moves the same
+   * distance every frame, and the eye reads any departure from that as a jump — which is not the same
+   * question as how far the guess is from the truth, and not the same question as how much the lead moved.
+   * A lead that jumps about to cancel a device reporting in clumps is doing its job.
+   *
+   * Two of them, because there are two ways to spend a lead and they judge it differently. The first is a
+   * caller with a true position to add the lead to. The second is a locked pointer, which has none and can
+   * only ever be pushed further along — `createLeadRatchet`, and the shape most of this library's callers
+   * are. A guess can be smooth for one and not the other. */
+  worstJump: number
+  worstRatchetJump: number
   worstLead: number
   meanLead: number
   /** How far the guessed position sits from the origin, averaged. Only means something on a circle, where
@@ -216,6 +229,7 @@ export const replay = (options: ReplayOptions): Metrics => {
   } = options
 
   const predictor = createPointerPredictor()
+  const ratchet = createLeadRatchet()
   let rndState = seed
   const rnd = () => (rndState = (rndState * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff
 
@@ -245,6 +259,14 @@ export const replay = (options: ReplayOptions): Metrics => {
   let previousRelativeAngle: number | null = null
   let previousHandAngle: number | null = null
   let phantom = 0
+  let worstJump = 0
+  let worstRatchetJump = 0
+  let previousTruth: Vec | null = null
+  let previousReported: Vec | null = null
+  let ratchetX = 0
+  let ratchetY = 0
+  let previousRatchetX = 0
+  let previousRatchetY = 0
   let worstLead = 0
   let leadSum = 0
   let worstOvershoot = 0
@@ -375,6 +397,26 @@ export const replay = (options: ReplayOptions): Metrics => {
           phantom += Math.hypot(movedX, movedY)
         }
       }
+      // How far the picture moved this frame against how far it should have. Both cameras are fed the same
+      // guess; they differ in what they are allowed to do with it.
+      const grew = ratchet.step(lead)
+      ratchetX += reportedX - (previousReported?.x ?? reportedX) + grew.x
+      ratchetY += reportedY - (previousReported?.y ?? reportedY) + grew.y
+      if (previousTruth && previousShown && previousReported) {
+        const wanted = Math.hypot(truth.x - previousTruth.x, truth.y - previousTruth.y)
+        worstJump = Math.max(
+          worstJump,
+          Math.abs(Math.hypot(shownX - previousShown.x, shownY - previousShown.y) - wanted),
+        )
+        worstRatchetJump = Math.max(
+          worstRatchetJump,
+          Math.abs(Math.hypot(ratchetX - previousRatchetX, ratchetY - previousRatchetY) - wanted),
+        )
+      }
+      previousRatchetX = ratchetX
+      previousRatchetY = ratchetY
+      previousTruth = truth
+      previousReported = { x: reportedX, y: reportedY }
       withSum += (shownX - truth.x) ** 2 + (shownY - truth.y) ** 2
       withoutSum += (integratedX - truth.x) ** 2 + (integratedY - truth.y) ** 2
       radialSum += Math.hypot(shownX, shownY)
@@ -415,6 +457,8 @@ export const replay = (options: ReplayOptions): Metrics => {
     backwards,
     worstBackwards,
     phantom,
+    worstJump,
+    worstRatchetJump,
     worstLead,
     meanLead: leadSum / frames,
     meanRadius: radialSum / frames,
@@ -448,6 +492,8 @@ export const worstAcross = (devices: readonly Device[], options: Omit<ReplayOpti
       backwards: Math.max(worst.backwards, run.backwards),
       worstBackwards: Math.max(worst.worstBackwards, run.worstBackwards),
       phantom: Math.max(worst.phantom, run.phantom),
+      worstJump: Math.max(worst.worstJump, run.worstJump),
+      worstRatchetJump: Math.max(worst.worstRatchetJump, run.worstRatchetJump),
       worstLead: Math.max(worst.worstLead, run.worstLead),
       meanLead: Math.min(worst.meanLead, run.meanLead),
       meanRadius: Math.max(worst.meanRadius, run.meanRadius),
@@ -472,7 +518,11 @@ const radians = (degrees: number) => (degrees * Math.PI) / 180
 export type Segment = { durationMs: number; at: (u: number) => Vec }
 
 /** Segments laid end to end, each starting where the last one finished, holding the final position for ever
- * after — which is what a hand that has stopped does, and what the score has to be able to ask about. */
+ * after — which is what a hand that has stopped does, and what the score has to be able to ask about.
+ *
+ * A path meant to be still moving when the run ends therefore has to carry a segment past the end of it, or
+ * the last frame reads as a hand stopping dead and every figure about jumps picks that up instead of the
+ * motion it was asked about. */
 export const piecewise = (segments: readonly Segment[]): Path => {
   const starts: number[] = []
   const offsets: Vec[] = []
@@ -746,13 +796,44 @@ export const SCENARIOS: readonly Scenario[] = [
   scenario(
     'sharp corner',
     'a right angle at full speed with no slowing: the heading inverts on one axis and holds on the other',
-    piecewise([glide(1.2, 0, 900), glide(1.2, 90, 900)]),
+    piecewise([glide(1.2, 0, 900), glide(1.2, 90, 1100)]),
     1800,
+  ),
+  scenario(
+    'corner, 45 degrees',
+    'a change of direction with no slowing at all, which is where a fit reads a stop that is not there',
+    piecewise([glide(2.5, 0, 700), glide(2.5, 45, 900)]),
+    1400,
+  ),
+  scenario(
+    'corner, 90 degrees',
+    'the same, square: half the window says one heading and half says the other',
+    piecewise([glide(2.5, 0, 700), glide(2.5, 90, 900)]),
+    1400,
+  ),
+  scenario(
+    'corner, 135 degrees',
+    'past square, where the travel across the window is shorter than either leg of it',
+    piecewise([glide(2.5, 0, 700), glide(2.5, 135, 900)]),
+    1400,
+  ),
+  scenario(
+    'corner, slow',
+    'the same square corner taken gently, where the window holds far fewer counts to read it from',
+    piecewise([glide(0.5, 0, 900), glide(0.5, 90, 1100)]),
+    1800,
+  ),
+  scenario(
+    'zigzag, sharp and fast',
+    'corner after corner with no straight between them to recover in',
+    piecewise([...Array.from({ length: 10 }, (_, i) => glide(2.2, i % 2 === 0 ? 60 : -60, 150))]),
+    1200,
+    200,
   ),
   scenario(
     'rounded corner',
     'the same corner taken round a radius, which is what a hand actually does',
-    piecewise([glide(1.2, 0, 900), arc(1.2, 140, 90, 0), glide(1.2, 90, 700)]),
+    piecewise([glide(1.2, 0, 900), arc(1.2, 140, 90, 0), glide(1.2, 90, 900)]),
     1900,
   ),
   scenario('circle', 'a hand going round, where a per-axis fit reads a stop twice a lap', circle(120, 400), 3000),

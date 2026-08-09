@@ -20,6 +20,14 @@
 // the inward part of the guess, which is why circling used to throw the lead outwards. In 2D none of them
 // fire, because a circling hand never slows and never turns around. It turns.
 //
+// The same mistake waits one level in, where the path is split into along and across. Along the heading
+// alone a corner and a stop are again the same event — the speed the hand had is going away — and a corner
+// takes it away harder and sooner than any stop does, so a hand turning a right angle at speed had the
+// guess asked for nothing at all on the frame the corner entered the window. The answer is the same as
+// before: look at the other axis. A hand coming to a stop pushes straight back along its path; a hand
+// turning pushes sideways, and through a right angle a hundredth of the bend pointed back along the path
+// and the rest of it across.
+//
 // So the extrapolation follows an arc rather than a straight line. Speed and heading come from the fit;
 // the turn rate is measured off the path, because over a wide arc a parabola fits the curvature badly but
 // the heading of the window's newer half against its older half is just two chords. The arc degenerates to
@@ -480,6 +488,20 @@ export const createPointerPredictor = (options: PredictorOptions = {}) => {
     // going at a dead constant speed. Subtract what quantisation alone would produce, so constant speed
     // reads as constant and a flick still reads as a flick.
     const bendAlong = bendX * tx + bendY * ty
+    // How much of the bend is the hand slowing rather than the hand turning. Seen along the heading alone,
+    // a corner is indistinguishable from a stop: the speed in the direction the hand was going collapses,
+    // and it collapses harder and sooner than any real stop does. It is the same blind spot a per-axis fit
+    // has at the extremum of a circle, one level in — and it has the same answer, which is to look at the
+    // other axis. A hand coming to a stop pushes straight back along its path. A hand turning pushes
+    // sideways, and a corner is almost entirely sideways: measured through a right angle at speed, a
+    // hundredth of the bend pointed back along the path and the rest of it across.
+    //
+    // Where the bend is too small to have a direction at all this says nothing and must not be allowed to:
+    // below its own noise floor it reads as one, which leaves every device too thin to carry a curvature
+    // braking exactly as it did before. That is the case the speed trend exists for, and this may not take
+    // it away.
+    const bendMagnitude = Math.hypot(bendX, bendY)
+    const slowing = bendMagnitude > bendFloor ? Math.abs(bendAlong) / bendMagnitude : 1
     const alongRaw = bendAlong * curveTrust
     let alongAcceleration = Math.sign(alongRaw) * Math.max(0, Math.abs(alongRaw) - bendFloor)
 
@@ -491,7 +513,9 @@ export const createPointerPredictor = (options: PredictorOptions = {}) => {
     // Only ever taken when it brakes harder than the settled reading does, so this can subtract lead and
     // never add it: a stop is seen sooner or exactly as before, never later.
     const brakeMeasured =
-      bendAlong < 0 && bendFloor > 0 ? Math.max(0, Math.min(1, (-bendAlong / bendFloor - 1) / (CURVE_SNR - 1))) : 0
+      bendAlong < 0 && bendFloor > 0
+        ? Math.max(0, Math.min(1, (-bendAlong / bendFloor - 1) / (CURVE_SNR - 1))) * slowing
+        : 0
     brakeConfidence += (brakeMeasured - brakeConfidence) * (1 - Math.exp(-deltaMs / BRAKE_TRUST_MS))
     const brakeTrust = brakeConfidence
     if (bendAlong < 0) {
@@ -510,8 +534,12 @@ export const createPointerPredictor = (options: PredictorOptions = {}) => {
     }
     lastSpeed = speedNow
     const trendFloor = (TREND_NOISE * countPx) / (span * Math.sqrt(used) * TREND_MS)
+    // The fitted speed falls at a corner as surely as it falls at a stop, and for a reason that has nothing
+    // to do with the hand: the straight line through a window that bends is the chord of it, and a chord is
+    // shorter than the path. So this is held to the same question as the curvature above — through a right
+    // angle the fitted speed dropped by a third with the hand at a dead constant speed throughout.
     if (speedTrend < 0 && trendFloor > 0) {
-      const believed = Math.max(0, Math.min(1, (-speedTrend / trendFloor - 1) / (CURVE_SNR - 1)))
+      const believed = Math.max(0, Math.min(1, (-speedTrend / trendFloor - 1) / (CURVE_SNR - 1))) * slowing
       alongAcceleration = Math.min(alongAcceleration, speedTrend * believed)
     }
 

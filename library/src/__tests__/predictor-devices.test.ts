@@ -135,6 +135,68 @@ describe('every device', () => {
     }
   })
 
+  test('the picture moves as unevenly as the device reports, and no worse', () => {
+    // **The biggest jump in this library is not in this library.** A hand at a dead constant speed should
+    // make a picture that moves the same distance every frame; on every device that coalesces, it does not,
+    // because the device's report interval and the display's refresh interval do not divide into each other.
+    // A trackpad reporting every 11ms into a 16.7ms frame delivers two samples on some frames and one on
+    // others, so the picture steps 55px and then 28px with the hand moving perfectly steadily.
+    //
+    // The lead neither causes it nor removes it: the two columns below are the picture with the guess
+    // applied and the reported position on its own, and they are the same figure. What the lead *could* do
+    // is remove it — the newest sample says exactly how stale the reported position is, so the motion
+    // missing from it is arithmetic rather than a guess. It is not done, for a reason worth writing down:
+    // that correction has to alternate every frame, and half this library's callers spend the lead through
+    // `createLeadRatchet`, which keeps growth and never gives it back. Feeding an alternating term through a
+    // ratchet turns it into permanent drift — measured at thirteen times the accumulation on a trackpad.
+    // Fixing it properly means smoothing the delivery on the way in, where a ratchet never sees it, and that
+    // is a change to the buffer rather than to the guess.
+    const BEAT: Record<string, { withLead: number; bare: number }> = {
+      wired: { withLead: 1.2, bare: 0.9 },
+      '8KHz mouse': { withLead: 1.2, bare: 0.9 },
+      '500Hz mouse': { withLead: 2.3, bare: 2 },
+      '125Hz mouse': { withLead: 6.8, bare: 6.4 },
+      trackpad: { withLead: 5.8, bare: 5.3 },
+      bluetooth: { withLead: 13.3, bare: 13.4 },
+      'slow radio': { withLead: 14.6, bare: 14.5 },
+      'low-DPI mouse': { withLead: 7.3, bare: 6.7 },
+      'half-pixel mouse': { withLead: 3.1, bare: 2.8 },
+      sparse: { withLead: 13.5, bare: 13.4 },
+    }
+    for (const device of ALL_DEVICES) {
+      const limits = BEAT[device.name]!
+      const path = steady(0.8, 30)
+      const guessed = replay({ path, device, durationMs: 2500 })
+      // What the same picture does with no lead applied at all: the beat by itself.
+      let bare = 0
+      let previousReported: { x: number; y: number } | null = null
+      let previousTruth: { x: number; y: number } | null = null
+      replay({
+        path,
+        device,
+        durationMs: 2500,
+        onFrame: frame => {
+          const truth = path(frame.frameAt + FRAME)
+          if (previousReported && previousTruth && frame.frameAt > 600) {
+            bare = Math.max(
+              bare,
+              Math.abs(
+                Math.hypot(frame.reported.x - previousReported.x, frame.reported.y - previousReported.y) -
+                  Math.hypot(truth.x - previousTruth.x, truth.y - previousTruth.y),
+              ),
+            )
+          }
+          previousReported = { x: frame.reported.x, y: frame.reported.y }
+          previousTruth = truth
+        },
+      })
+      expect(bare).toBeLessThan(limits.bare + 0.05)
+      expect(guessed.worstJump).toBeLessThan(limits.withLead)
+      // The guess may not make it worse than the device already is by more than a fraction of a pixel.
+      expect(guessed.worstJump).toBeLessThan(bare + 1)
+    }
+  })
+
   test('a device nobody would call fast still gets a guess worth having', () => {
     // One report every 25ms with 4ms of wander: most frames see nothing at all and the window holds two or
     // three samples. It cannot be as good as a wired mouse and it must not be useless.

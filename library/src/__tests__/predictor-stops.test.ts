@@ -10,6 +10,7 @@ import {
   piecewise,
   replay,
   SPARSE,
+  worstAcross,
   TRACKPAD,
   WIRED,
   type ReplayOptions,
@@ -145,6 +146,16 @@ describe('coming off a flick', () => {
     })
   }
 
+  test('a device too thin to carry a curvature still gets its stop', () => {
+    // The window here holds two or three samples, so the bend has no direction worth reading and the stop is
+    // seen entirely in the fitted speed falling across frames. Telling a turn from a stop by where the bend
+    // points must not take that away: below its own noise floor the bend says nothing, and a reading that
+    // says nothing may not be allowed to argue. Letting it, this stop went from 41 to 56px past the hand.
+    const stop = replay({ path: flick(2.6, 20, 800, 150), device: SPARSE, durationMs: 1350 })
+    expect(stop.worstOvershoot).toBeLessThan(45)
+    expect(stop.phantom).toBeLessThan(48)
+  })
+
   test('the lead is already coming down while the hand is still moving', () => {
     // The whole reason for fitting a curve rather than smoothing a velocity. An estimator that cannot see a
     // stop coming is still near its peak when the hand is already still; this asks where the guess is at the
@@ -249,6 +260,80 @@ describe('starting again', () => {
       const straightIn = sail(50)
       for (const idleMs of [200, 500, 1500, 4000]) {
         expect(sail(idleMs)).toBeLessThanOrEqual(straightIn + 2)
+      }
+    }
+  })
+})
+
+describe('turning is not stopping', () => {
+  // Seen along the heading alone, a corner and a stop are the same event: the speed in the direction the
+  // hand was going collapses. A corner collapses it harder and sooner than any real stop, and braking is
+  // deliberately believed on thin evidence and acted on at once — so a hand turning a right angle at speed
+  // had the guess asked for *nothing at all* on the frame the corner entered the window. Zero, from a hand
+  // that had not slowed by a single pixel per second.
+  //
+  // What tells them apart is the other axis, which is the same answer this library gives for a per-axis fit
+  // at the extremum of a circle. A hand coming to a stop pushes straight back along its path; a hand turning
+  // pushes sideways. Measured through a right angle at speed, a hundredth of the bend pointed back along the
+  // path and the rest of it across.
+  const corner = (turnDeg: number, speed = 2.5) => piecewise([glide(speed, 0, 700), glide(speed, turnDeg, 900)])
+
+  // How far the guess may dip through the turn, against what it held going in. The sharper the corner the
+  // more of it is honest — the hand's own lead across a 135 degree corner really is short, because the two
+  // legs cancel — so each angle is held to its own figure.
+  const DIP: Record<number, number> = { 45: 0.85, 90: 0.62, 135: 0.28 }
+
+  test('a corner does not read as a hand that has stopped', () => {
+    // The guess through the turn, against the guess before it. A corner costs some of it — the window holds
+    // two headings and the fitted speed across it is the chord — but it may not cost all of it.
+    for (const device of DEVICES) {
+      for (const turnDeg of [45, 90, 135]) {
+        const frames = framesOf({ path: corner(turnDeg), device, durationMs: 1400 })
+        const before = Math.max(...frames.filter(frame => frame.frameAt < 690).map(size))
+        const through = frames.filter(frame => frame.frameAt >= 690 && frame.frameAt < 820)
+        expect(Math.min(...through.map(size))).toBeGreaterThan(before * DIP[turnDeg]!)
+      }
+    }
+  })
+
+  test('the guess does not jump in size going round a corner', () => {
+    // How much the size of the guess may move in one frame while the hand turns. Reading the corner as
+    // braking put this at 6.4px on a hand whose speed never changed.
+    const SIZE: Record<number, number> = { 45: 4, 90: 9.5, 135: 17 }
+    for (const turnDeg of [45, 90, 135]) {
+      const worst = worstAcross(DEVICES, { path: corner(turnDeg), durationMs: 1400 })
+      expect(worst.worstSizeStep).toBeLessThan(SIZE[turnDeg]!)
+    }
+  })
+
+  test('a corner adds little to what the device is already doing', () => {
+    // The honest scoring of a corner. A picture that moves unevenly is what a user reports as a jump, and
+    // most of it on any device slower than a wired mouse is the device reporting in clumps rather than
+    // anything the corner did — so what a corner may add is measured against the same hand going straight.
+    // The figure is what the corner is worth on top of that, and it is small.
+    const ADDED: Record<string, number> = { wired: 9, trackpad: 6, bluetooth: 4, 'slow radio': 13 }
+    for (const device of DEVICES) {
+      const turning = replay({ path: corner(90), device, durationMs: 1400 })
+      const straight = replay({ path: piecewise([glide(2.5, 0, 1600)]), device, durationMs: 1400 })
+      expect(turning.worstJump - straight.worstJump).toBeLessThan(ADDED[device.name]!)
+    }
+  })
+
+  test('a corner is not led round further than the hand went', () => {
+    // The arc extrapolation swings the guess through the turn it believes the path has. A corner is not an
+    // arc: the heading changes once and then holds, and a turn rate read off it is a rate that will not
+    // continue. Bending the guess through the corner and out the other side is a visible kick.
+    for (const device of ALL_DEVICES) {
+      for (const turnDeg of [45, 90, 135]) {
+        const frames = framesOf({ path: corner(turnDeg), device, durationMs: 1400 })
+        const after = frames.filter(frame => frame.frameAt > 780)
+        const heading = (turnDeg * Math.PI) / 180
+        for (const frame of after) {
+          if (size(frame) < 1) continue
+          // Never further round than the new heading, give or take what the ramp is still carrying.
+          const across = -frame.lead.x * Math.sin(heading) + frame.lead.y * Math.cos(heading)
+          expect(across).toBeLessThan(size(frame) * 0.75)
+        }
       }
     }
   })
