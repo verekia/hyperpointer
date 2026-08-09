@@ -1,19 +1,27 @@
 import { describe, expect, test } from 'bun:test'
 
+import { createPointerPredictor, DEFAULT_DECAY_MS, DEFAULT_LEAD_FRAMES, DEFAULT_MAX_LEAD_PX } from '../predictor.js'
 import {
   ALL_DEVICES,
   BLUETOOTH,
   COARSE,
+  FINE,
   flick,
+  glide,
   HZ_120,
   HZ_144,
   HZ_30,
   HZ_60,
+  FRAME,
+  hold,
+  piecewise,
   replay,
+  SCENARIOS,
   SPARSE,
   steady,
   TRACKPAD,
   USB_125,
+  USB_500,
   WIRED,
 } from './harness.js'
 
@@ -26,10 +34,13 @@ import {
 // refreshes because the delay it covers is a count of refreshes, so the same setting has to mean half as
 // long on a 120Hz screen and the figures have to hold there too.
 
+const SHIPPED = { leadFrames: DEFAULT_LEAD_FRAMES, decayMs: DEFAULT_DECAY_MS, maxLeadPx: DEFAULT_MAX_LEAD_PX }
+
 describe('every device', () => {
   // How much the size of the guess may jump in one frame, on a hand that is doing nothing new. Measured,
-  // then given room. The ordering is the interesting part: it tracks how often the device reports, and the
-  // one device that breaks the ordering breaks it for a reason worth knowing (see below).
+  // then given room. The ordering is the interesting part: it tracks how often the device reports and
+  // nothing else — the low-DPI mouse sits with the other devices of its rate rather than thirty times worse
+  // than them, which is the whole of what measuring the count size bought.
   const STEADY: Record<string, { fast: number; slow: number; gain: number }> = {
     wired: { fast: 0.05, slow: 0.09, gain: 0.06 },
     '8KHz mouse': { fast: 0.04, slow: 0.07, gain: 0.05 },
@@ -38,7 +49,8 @@ describe('every device', () => {
     trackpad: { fast: 0.23, slow: 0.18, gain: 0.17 },
     bluetooth: { fast: 0.73, slow: 0.25, gain: 0.28 },
     'slow radio': { fast: 0.64, slow: 0.29, gain: 0.36 },
-    'low-DPI mouse': { fast: 5.9, slow: 3, gain: 0.4 },
+    'low-DPI mouse': { fast: 0.75, slow: 0.65, gain: 0.24 },
+    'half-pixel mouse': { fast: 0.06, slow: 0.08, gain: 0.08 },
     sparse: { fast: 0.95, slow: 0.29, gain: 0.29 },
   }
 
@@ -58,14 +70,19 @@ describe('every device', () => {
   test('a crawl is led by nothing at all', () => {
     // Below the gate there is nothing in the samples a fit can tell from quantisation, and a caller applying
     // only the growth keeps every upward wobble of it for as long as the drag lasts. Exactly nothing, not
-    // nearly nothing — the low-DPI mouse is the exception and it is a bug rather than a tolerance, so it is
-    // held on its own below.
+    // nearly nothing.
     for (const device of ALL_DEVICES) {
       if (device === COARSE) continue
       const { worstLead, kept } = replay({ path: steady(0.06, 30), device, durationMs: 4000 })
       expect(worstLead).toBe(0)
       expect(kept).toBe(0)
     }
+    // The low-DPI mouse takes about half a second to be recognised as one, and until then its counts are
+    // assumed to be pixels and a stray pair of them reads as motion. What it may not do is go on doing that
+    // for the rest of the drag.
+    const coarse = replay({ path: steady(0.06, 30), device: COARSE, durationMs: 4000 })
+    expect(coarse.worstLead).toBeLessThan(2)
+    expect(coarse.kept).toBeLessThan(12)
   })
 
   test('a stalling frame clock does not throw the lead about', () => {
@@ -80,7 +97,8 @@ describe('every device', () => {
       trackpad: 0.55,
       bluetooth: 1.2,
       'slow radio': 1.9,
-      'low-DPI mouse': 12,
+      'low-DPI mouse': 0.8,
+      'half-pixel mouse': 0.4,
       sparse: 1.7,
     }
     for (const device of ALL_DEVICES) {
@@ -128,44 +146,179 @@ describe('every device', () => {
 })
 
 describe('a device whose counts are wider than a pixel', () => {
-  // **A known weak spot, written down as numbers so that fixing it shows up as numbers.**
+  // Every noise floor in the fit is written in units of one count, and what a count is worth in pixels is
+  // not something a browser reports: it is the mouse's resolution, the OS's scaling and the page's device
+  // pixel ratio multiplied together. Assumed to be one pixel, as it was, a device reporting four made every
+  // floor four times too low and its noise was believed as motion — the guess swung 28 degrees of heading a
+  // frame on a dead straight path, jumped thirty times as far in size as the same hand on a 125Hz mouse
+  // reporting just as often, ratcheted nine times as much, and led a crawl it should have refused.
   //
-  // Every noise floor in the fit is written in units of one count and one count is assumed to be about one
-  // pixel — `QUANTISATION_PX`. That holds for a mouse at default sensitivity, and it does not hold for a
-  // low-DPI one, a page at a device pixel ratio other than 1, or an OS scaling the counts on the way
-  // through: this device reports four pixels a step, so the bend, the turn and the trend all sit four times
-  // higher above floors that have not moved, and noise gets believed as motion.
-  //
-  // What that costs, against the same hand on a 125Hz mouse that reports just as often: the lead's size
-  // jumps thirty times as far in a frame, it swings through 28° of heading on a path with no turn in it at
-  // all, and a caller keeping the growth accumulates nine times as much. None of that is a device problem —
-  // it is one constant that does not know what a count is worth.
-  //
-  // These are ceilings on a known-bad case, not a floor anyone is proud of. Scaling the floors by the count
-  // size — from the deltas the device actually reports, since nothing else knows — should collapse all four.
-  test('is the case the noise floors do not fit', () => {
+  // The count is measured now, off the only thing that knows: every delta a device reports is a whole number
+  // of counts, so the grid they sit on is their greatest common divisor. These are the same four figures
+  // afterwards, and the control below is what they are supposed to look like.
+  test('is measured off the deltas, and the floors follow it', () => {
     const fast = replay({ path: steady(0.8, 30), device: COARSE, durationMs: 2500 })
-    expect(fast.worstSizeStep).toBeLessThan(5.9)
-    expect(fast.worstTurnStep).toBeLessThan(35)
-    expect(fast.kept).toBeLessThan(250)
+    const fine = replay({ path: steady(0.8, 30), device: USB_125, durationMs: 2500 })
+    expect(fast.worstSizeStep).toBeLessThan(0.75)
+    expect(fast.worstTurnStep).toBeLessThan(1.5)
+    expect(fast.kept).toBeLessThan(65)
+    // Not as good as one-pixel counts — four times the quantisation is four times the quantisation — but
+    // within a few times of it rather than a couple of orders.
+    expect(fast.worstSizeStep).toBeLessThan(fine.worstSizeStep * 5)
+    expect(fast.worstTurnStep).toBeLessThan(fine.worstTurnStep * 5)
+    expect(fast.kept).toBeLessThan(fine.kept * 3)
 
     const slow = replay({ path: steady(0.15, 30), device: COARSE, durationMs: 2500 })
-    expect(slow.worstTurnStep).toBeLessThan(175)
-
-    // And the same constant is what lets a crawl through the speed gate: at 0.06px/ms the hand covers less
-    // than a count a frame, so two counts landing close together read as a hand going six times faster than
-    // it is. Every other device is led by exactly nothing here.
-    const crawl = replay({ path: steady(0.06, 30), device: COARSE, durationMs: 4000 })
-    expect(crawl.worstLead).toBeLessThan(8)
-    expect(crawl.kept).toBeLessThan(50)
+    expect(slow.worstTurnStep).toBeLessThan(1)
+    expect(slow.worstSizeStep).toBeLessThan(0.65)
   })
 
-  test('a mouse reporting just as often but in single pixels is steady', () => {
-    // The control for the case above: same period, same burst, same wander, one-pixel counts.
-    const fine = replay({ path: steady(0.8, 30), device: USB_125, durationMs: 2500 })
-    expect(fine.worstSizeStep).toBeLessThan(0.2)
-    expect(fine.worstTurnStep).toBeLessThan(1)
-    expect(fine.kept).toBeLessThan(25)
+  test('is not paid for in lead on a hand moving normally', () => {
+    // The floors going up is the point; the gate going up with them would not be. A drag at 0.8px/ms puts
+    // twenty counts across the window on this device, which is far too few to fit a curve to and plenty to
+    // say how fast the hand is going — so the travel is read with the extra uncertainty taken off it rather
+    // than the threshold being multiplied, and an ordinary hand keeps its lead.
+    const drag = replay({ path: steady(0.8, 30), device: COARSE, durationMs: 2500 })
+    expect(drag.meanLead).toBeGreaterThan(14)
+    expect(drag.gain).toBeLessThan(0.24)
+    const aiming = replay({ path: steady(0.35, 25), device: COARSE, durationMs: 2500 })
+    expect(aiming.meanLead).toBeGreaterThan(5)
+    expect(aiming.gain).toBeLessThan(0.45)
+  })
+
+  test('costs the curvature, which four-pixel counts genuinely cannot carry', () => {
+    // **The trade, pinned so it can be argued with.** A second derivative over a window holding a handful of
+    // four-pixel steps sits about 1.3 times its own noise, and a floor that knows what a count is worth now
+    // says so — where before it read five times its noise and was believed outright. So the arc is mostly
+    // given up on this device and the guess falls back to the straight line, which on a circle points half a
+    // window's worth of turning behind the tangent. Guessing is still better than not guessing, and not by
+    // much.
+    //
+    // It is the honest reading of what the samples support, and it is not the end of the matter: the heading
+    // the arc is swept from is the window's average rather than its newest, and advancing it by the turn
+    // already measured would give most of this back without believing any more of the curvature. That is a
+    // change to how every device extrapolates, so it is a separate one, and these are the numbers it would
+    // have to beat.
+    for (const [name, gain] of [
+      ['circle', 0.94],
+      ['circle, hand-drawn', 0.94],
+      ['circle, tight and fast', 1],
+      ['spiral', 0.81],
+      ['figure eight', 0.84],
+      ['serpentine', 0.6],
+      ['wide slow arc', 0.31],
+    ] as const) {
+      const scenario = SCENARIOS.find(candidate => candidate.name === name)!
+      const metrics = replay({
+        path: scenario.path,
+        device: COARSE,
+        durationMs: scenario.durationMs,
+        scoreAfterMs: scenario.scoreAfterMs,
+      })
+      expect(metrics.gain).toBeLessThanOrEqual(gain)
+      // Whatever it costs in lateness, it may not be bought back as shake.
+      expect(metrics.worstSizeStep).toBeLessThan(3)
+    }
+  })
+
+  test('counts finer than a pixel do not lower the floors under them', () => {
+    // The other side of the same assumption, and deliberately not symmetric. A device reporting half-pixel
+    // steps is quieter than the floors expect, and following it down would mean believing more of what a
+    // second derivative reads — on the strength of an estimate made from deltas. Holding at a pixel costs
+    // that device a little sensitivity and can break nothing, so this asks that it behaves like the
+    // one-pixel device of its own rate rather than better or worse than it.
+    const fine = replay({ path: steady(0.8, 30), device: FINE, durationMs: 2500 })
+    const pixels = replay({ path: steady(0.8, 30), device: USB_500, durationMs: 2500 })
+    expect(fine.worstSizeStep).toBeLessThan(pixels.worstSizeStep * 2)
+    expect(fine.gain).toBeLessThan(pixels.gain * 1.5)
+    // And a crawl is still refused outright, which is the figure a lowered floor would spend first.
+    const crawl = replay({ path: steady(0.06, 30), device: FINE, durationMs: 4000 })
+    expect(crawl.worstLead).toBe(0)
+  })
+
+  test('one window of deltas that share a factor is not enough to move the floors', () => {
+    // A quarter second is long enough for a hand to be regular by accident — a steady stretch reporting
+    // threes and nothing else. Believed on its own that puts the floors up threefold and takes two pixels
+    // off every reading of the travel, which throttles a slow hand by a third for as long as it lasts. Two
+    // windows have to agree, and the second one here does not.
+    const predictor = createPointerPredictor()
+    let now = 1000
+    const step = (deltaPx: number) => {
+      predictor.push(now - 13, deltaPx, 0)
+      const lead = predictor.update({ nowMs: now, deltaMs: FRAME, ...SHIPPED })
+      now += FRAME
+      return lead.x
+    }
+    // 0.18px/ms, a slow deliberate drag, reported in threes for the first window and honestly after it.
+    for (let frame = 0; frame < 16; frame++) step(3)
+    let worst = Infinity
+    // The window straight after the regular one, which is the only one a single-window answer would reach.
+    for (let frame = 0; frame < 15; frame++) worst = Math.min(worst, step(frame % 3 === 0 ? 4 : 3))
+    expect(worst).toBeGreaterThan(2.8)
+  })
+
+  test('is found on whichever axis the hand is using', () => {
+    // A hand dragging straight down reports nothing on X at all, so a count looked for on X alone would
+    // never be found and the whole drag would be spent assuming pixels. Both axes read the same here, which
+    // is the point: an axis-aligned drag is a hand steadying itself, not a special case.
+    const downwards = replay({ path: steady(0.8, 90), device: COARSE, durationMs: 2500 })
+    const sideways = replay({ path: steady(0.8, 0), device: COARSE, durationMs: 2500 })
+    expect(downwards.worstSizeStep).toBeLessThan(0.4)
+    expect(sideways.worstSizeStep).toBeLessThan(0.4)
+    expect(downwards.worstSizeStep).toBeCloseTo(sideways.worstSizeStep, 6)
+  })
+
+  test('a device that keeps stopping is not forgotten between movements', () => {
+    // What a count is worth is learned from windows that carried motion, and a hand that moves in bursts
+    // leaves most windows empty. Letting an empty one answer would drop the device back to being assumed to
+    // report in pixels every time it paused, and it would spend the first half second of every burst there.
+    const path = piecewise([hold(200), ...Array.from({ length: 6 }, () => [glide(0.5, 15, 260), hold(300)]).flat()])
+    const metrics = replay({ path, device: COARSE, durationMs: 3600, scoreAfterMs: 300 })
+    expect(metrics.worstTurnStep).toBeLessThan(12)
+    expect(metrics.kept).toBeLessThan(72)
+  })
+
+  test('a hand whose deltas happen to share a factor is not mistaken for one', () => {
+    // The risk the estimator runs: a hand at a steady speed on an ordinary mouse can report the same delta
+    // over and over, and a run of fours has a common divisor of four whatever the device underneath. Two
+    // windows have to agree before the floors move, and a real hand does not hold a factor that long — but
+    // when it does, the cost has to be small, so this is the pathological case with the wobble turned off.
+    const marching = createPointerPredictor()
+    let now = 1000
+    let lead = 0
+    for (let frame = 0; frame < 120; frame++) {
+      // Exactly four pixels every millisecond, on a device whose counts are one.
+      for (let s = 1; s <= 16; s++) marching.push(now - 13 - FRAME + (s * FRAME) / 16, 4, 0)
+      lead = marching.update({ nowMs: now, deltaMs: FRAME, ...SHIPPED }).x
+      now += FRAME
+    }
+    // 4px/ms over about 30ms of horizon is 120px, which the cap holds at 100 either way. What a mistaken
+    // count would cost here is the gate taking three pixels off the travel, which is under a percent of it.
+    expect(lead).toBeGreaterThan(99)
+  })
+
+  test('what a count is worth survives a reset', () => {
+    // It is a property of the device, not of the session: dropping it would put the floors back to assuming
+    // pixels for the first half second after every unlock, which is exactly when the hand is moving again.
+    const predictor = createPointerPredictor()
+    let now = 1000
+    // Long enough to learn, on a hand slow enough that assuming pixels would lead it.
+    for (let frame = 0; frame < 90; frame++) {
+      if (frame % 4 === 0) predictor.push(now - 13, 4, 0)
+      predictor.update({ nowMs: now, deltaMs: FRAME, ...SHIPPED })
+      now += FRAME
+    }
+    predictor.reset()
+
+    let worst = 0
+    for (let frame = 0; frame < 60; frame++) {
+      if (frame % 4 === 0) predictor.push(now - 13, 4, 0)
+      const lead = predictor.update({ nowMs: now, deltaMs: FRAME, ...SHIPPED })
+      worst = Math.max(worst, Math.hypot(lead.x, lead.y))
+      now += FRAME
+    }
+    // One count every four frames is 0.06px/ms, which is a crawl however wide the count is.
+    expect(worst).toBeLessThan(2)
   })
 })
 

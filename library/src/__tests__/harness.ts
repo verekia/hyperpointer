@@ -64,6 +64,10 @@ export const USB_8K = device('8KHz mouse', 0.125, 1, 0.05)
 /** Coarse counts: four pixels a step, which is what a low-DPI mouse reports. The path arrives as a
  * staircase, and every noise floor in the fit is written in units of one count. */
 export const COARSE = device('low-DPI mouse', 8, 1, 0.5, 4)
+/** Counts finer than a pixel, which is what a page at a device pixel ratio of two reports. The floors were
+ * tuned at a pixel and are held there rather than followed down: a device quieter than they assume costs a
+ * little sensitivity, and one noisier than they assume is the bug this is the other side of. */
+export const FINE = device('half-pixel mouse', 4, 1, 0.3, 0.5)
 /** The sparsest thing that still calls itself a pointer: less than one report a frame, so most frames see
  * nothing and the window holds two or three samples. */
 export const SPARSE = device('sparse', 25, 1, 4)
@@ -80,6 +84,7 @@ export const ALL_DEVICES: readonly Device[] = [
   BLUETOOTH,
   SLOW_RADIO,
   COARSE,
+  FINE,
   SPARSE,
 ]
 
@@ -762,6 +767,12 @@ export const SCENARIOS: readonly Scenario[] = [
     'a small circle fast enough that a whole horizon of turning is past a right angle',
     circle(25, 110),
     2500,
+  ),
+  scenario(
+    'circle, hand-drawn',
+    'the same circle with a hand on it, so the quantisation error stops being a function of the angle',
+    withTremor(circle(120, 400), 1.5, 7),
+    3000,
   ),
   scenario('circle, reversed', 'and the other way round, so a turn sign error cannot hide', circle(120, 400, -1), 3000),
   scenario(

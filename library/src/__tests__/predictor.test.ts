@@ -514,6 +514,12 @@ describe('pointer prediction', () => {
 //     reach it. It is a guard against a fit that has run away, not against a hand.
 //   - The horizon being cut short at the point the fit says the hand stops. Past that point the distance is
 //     already floored at zero, so removing the cut moves nothing measurably.
+//   - The measured count size being held at a pixel from below. A device reporting finer than a pixel is
+//     quieter than the floors assume, so following it down would mean believing more of what a second
+//     derivative reads on the strength of an estimate — and holding costs it nothing measurable on any hand
+//     or device here. It is what makes measuring the count safe rather than a retune of every floor: the
+//     answer can only ever move them up, which is why eight of the nine devices are bit-identical to how
+//     they were before it existed.
 //
 // CURVE_TRUST_MS used to be a third: the synthetic hands in this file move too perfectly for the bend to
 // sit near its noise floor, which is the flicker it exists to stop. The tremor and coarse-count cases next

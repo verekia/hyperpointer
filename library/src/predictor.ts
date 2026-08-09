@@ -54,6 +54,14 @@
 // most, while a steady drag looks thick when there is no bend there to find. Asking how far the bend
 // stands above the noise instead is both more accurate and steadier, and it is the same question whatever
 // the device: a hand crossing a mouse pad reads the same on a wired mouse and one on a radio.
+//
+// **What a count is worth is measured, not assumed.** Every one of those floors is written in units of one
+// count, and one count is a pixel only on a mouse at ordinary sensitivity — a low-DPI one steps four, and so
+// does anything scaled on the way through by the OS or by a page that is not at a device pixel ratio of 1.
+// Assumed, that put every floor four times too low on such a device and its staircase was believed as
+// motion. So the count is read off the deltas, which are the only thing that knows: every delta is a whole
+// number of counts, so the grid they sit on is their greatest common divisor, and unlike every other
+// statistic to hand that reading does not confuse a coarse device with a fast hand.
 
 import type { PointerFrame } from './pointer.js'
 
@@ -79,9 +87,31 @@ const TURN_SNR = 2
 // A guess that bends further than this over one horizon is not a turn a hand makes; it is a fit that has
 // run away.
 const MAX_TURN_RAD = Math.PI / 2
-// About one mouse count, which is how far off a chord that ends on whole counts can point. Used to work out
-// how much of a measured turn is quantisation before any of it is believed.
+// How far off a chord that ends on whole counts can point, and the unit every noise floor below is written
+// in: one count. What a count is worth in pointer pixels is the assumption, and it is only one pixel on a
+// mouse at ordinary sensitivity — a low-DPI one moves several, and so does any device whose counts are
+// scaled on the way through, by the OS or by a page that is not at a device pixel ratio of 1. Every floor is
+// then several times too low, and noise gets believed as motion: measured on a mouse reporting four pixels a
+// count, the guess swung 28 degrees of heading a frame on a dead straight path and led a crawl it should
+// have refused outright.
+//
+// So the count is measured rather than assumed, and the deltas are the only thing that knows. Every delta a
+// device reports is a whole number of counts, so the grid they all sit on is their greatest common divisor —
+// the one reading of it that does not care how fast the hand is going. A hand crossing the pad reports 5 and
+// 6 and 5, which share nothing but 1; the same hand on a low-DPI mouse reports 20 and 24 and 20, which share
+// 4. Sample counts, smallest deltas and every other obvious statistic all say "coarse device" and "fast
+// hand" with the same voice, and the difference is the whole point.
 const QUANTISATION_PX = 1
+// Long enough to hold a few dozen deltas of an ordinary drag, and two of them have to agree before the
+// floors move: over one window a hand can be regular enough that its deltas share a factor by luck, and
+// twice running it cannot. Learning therefore takes about half a second of motion, during which the counts
+// are assumed to be pixels, which is where they started.
+const COUNT_WINDOW_MS = 250
+// Wider than this is not a count size, it is a caller scaling deltas into something that is not pixels, and
+// the floors have no business following it there.
+const MAX_COUNT_PX = 16
+// Deltas are whole counts, so a remainder this far under one is the division coming out even.
+const COUNT_EPSILON = 0.05
 // How much a least-squares curvature wobbles for a given amount of that quantisation, over a window of a
 // given length and sample count. Tuned on a steady drag, where every bit of curvature read is noise.
 const ACCEL_NOISE = 20
@@ -143,6 +173,20 @@ const REVERSAL_HORIZON = 0.4
 // the two apart in advance. Shared, because the ramp and the compensation for the ramp's own lag have to be
 // talking about the same number or the correction is for a filter that is not there.
 const rampLength = (decayMs: number, confidence: number) => Math.max(decayMs * (1 + NOISE_EASE * (1 - confidence)), 1)
+
+/** Euclid, to a tolerance, because a count is not always a whole number of pixels either. The iteration
+ * count is bounded because a pair of deltas that do not converge is a pair to give up on rather than to keep
+ * dividing: falling back to a common divisor of one is the assumption this started from. */
+const sharedDivisor = (a: number, b: number) => {
+  let x = a
+  let y = b
+  for (let i = 0; i < 8 && y > COUNT_EPSILON; i++) {
+    const remainder = x % y
+    x = y
+    y = remainder
+  }
+  return y > COUNT_EPSILON ? QUANTISATION_PX : x
+}
 
 export type PredictorOptions = {
   /** How many display refreshes ahead to guess. This is a count of refreshes rather than a duration
@@ -226,11 +270,31 @@ export const createPointerPredictor = (options: PredictorOptions = {}) => {
   let headingY = 0
   let msSinceReversal = 1e4
   let reversalPeriodMs = 1e4
+  // What one count of this device is worth in pointer pixels, and the two windows of deltas behind that
+  // answer. Believed only as far as the assumption it replaces is safe: a device reporting finer than a
+  // pixel is quieter than the floors expect, which costs a little sensitivity and can break nothing, so
+  // this only ever moves them up.
+  let countPx = QUANTISATION_PX
+  let countThisWindow = 0
+  let countLastWindow = 0
+  let countWindowAt = -1
 
   const out: Lead = { x: 0, y: 0, live: 1 }
 
+  const observeCount = (delta: number) => {
+    const size = Math.abs(delta)
+    if (size < COUNT_EPSILON) return
+    countThisWindow = countThisWindow === 0 ? size : sharedDivisor(countThisWindow, size)
+  }
+
   /** One coalesced sample: when the motion happened, and how far it went on each axis. */
   const push = (timeStampMs: number, deltaX: number, deltaY: number) => {
+    // Once this window's deltas have nothing bigger than a pixel in common there is nothing left to learn
+    // from it, which is the case on every device that reports in pixels and costs them a comparison.
+    if (countThisWindow === 0 || countThisWindow > QUANTISATION_PX) {
+      observeCount(deltaX)
+      observeCount(deltaY)
+    }
     cumulativeX += deltaX
     cumulativeY += deltaY
     times[head] = timeStampMs
@@ -317,7 +381,14 @@ export const createPointerPredictor = (options: PredictorOptions = {}) => {
     // the hand is going lets every spike through amplified. Under a crawl the lead is dropped entirely —
     // a caller that keeps what it is given keeps every upward wobble too, so jitter at a slow steady
     // drag accumulates for as long as the drag lasts.
-    const travel = Math.hypot(travelX, travelY)
+    // Travel is only known to within a count, and the gate below is a speed tuned against a device whose
+    // counts are pixels — so the extra uncertainty of a wider one comes off the travel before it is read.
+    // Left in, a hand well under the gate reads several times over it on a low-DPI mouse whenever two counts
+    // happen to land close together, and a crawl gets led by a fit that is entirely staircase. Taking it off
+    // the travel rather than putting it on the threshold is what keeps an ordinary drag on that device led:
+    // four counts across a window are few enough that no curve can be fitted to them and plenty to say how
+    // fast the hand is going.
+    const travel = Math.max(0, Math.hypot(travelX, travelY) - (countPx - QUANTISATION_PX))
     const speed = span > 0 ? travel / span : 0
     const trust = Math.max(0, Math.min(1, (speed - SLOW_PX_PER_MS) / (SURE_PX_PER_MS - SLOW_PX_PER_MS)))
     if (trust === 0) return false
@@ -360,7 +431,7 @@ export const createPointerPredictor = (options: PredictorOptions = {}) => {
     // mouse looks exactly as thin as a slow device, and that is the moment the bend matters most.
     // How much a least-squares curvature wobbles for this much quantisation over a window this long and
     // this well populated. Every judgement about whether a bend is real is asked against it.
-    const bendFloor = (ACCEL_NOISE * QUANTISATION_PX) / (span * span * Math.sqrt(used))
+    const bendFloor = (ACCEL_NOISE * countPx) / (span * span * Math.sqrt(used))
     const measured =
       bendFloor > 0 ? Math.max(0, Math.min(1, (Math.hypot(bendX, bendY) / bendFloor - 1) / (CURVE_SNR - 1))) : 0
     // A bend sitting near its own noise floor answers this differently every frame, and the answer decides
@@ -438,7 +509,7 @@ export const createPointerPredictor = (options: PredictorOptions = {}) => {
       speedTrend += ((speedNow - lastSpeed) / deltaMs - speedTrend) * (1 - Math.exp(-deltaMs / TREND_MS))
     }
     lastSpeed = speedNow
-    const trendFloor = (TREND_NOISE * QUANTISATION_PX) / (span * Math.sqrt(used) * TREND_MS)
+    const trendFloor = (TREND_NOISE * countPx) / (span * Math.sqrt(used) * TREND_MS)
     if (speedTrend < 0 && trendFloor > 0) {
       const believed = Math.max(0, Math.min(1, (-speedTrend / trendFloor - 1) / (CURVE_SNR - 1)))
       alongAcceleration = Math.min(alongAcceleration, speedTrend * believed)
@@ -511,7 +582,7 @@ export const createPointerPredictor = (options: PredictorOptions = {}) => {
         // it is a flat tax: it removes as much from a turn a hand really made as from one only the counts
         // made up, and on a circle a hand does make that came to a third of the turn — which is most of
         // why the guess used to sit outside the circle.
-        const floor = QUANTISATION_PX * (1 / newLength + 1 / oldLength)
+        const floor = countPx * (1 / newLength + 1 / oldLength)
         const angle = Math.atan2(cross, dot)
         const believed = floor > 0 ? Math.max(0, Math.min(1, (Math.abs(angle) / floor - 1) / (TURN_SNR - 1))) : 0
         turn = (angle / (span / 2)) * believed * curveTrust
@@ -550,6 +621,17 @@ export const createPointerPredictor = (options: PredictorOptions = {}) => {
     // handed over on the frame after every stall. Clamping what the average is allowed to see leaves a
     // real refresh change to walk there over a few frames and a stall to barely register.
     if (deltaMs > 0) frameMs += (Math.min(deltaMs, frameMs * MAX_FRAME_STEP) - frameMs) * FRAME_SMOOTHING
+
+    // What a count of this device is worth, settled a window at a time. A window that carried no motion has
+    // nothing to say and is simply extended, so a hand sitting still cannot make the answer expire.
+    if (countWindowAt < 0) countWindowAt = nowMs
+    else if (nowMs - countWindowAt >= COUNT_WINDOW_MS && countThisWindow > 0) {
+      const agreed = countLastWindow > 0 ? Math.min(countThisWindow, countLastWindow) : QUANTISATION_PX
+      countPx = Math.min(MAX_COUNT_PX, Math.max(QUANTISATION_PX, agreed))
+      countLastWindow = countThisWindow
+      countThisWindow = 0
+      countWindowAt = nowMs
+    }
 
     const newestT = count > 0 ? times[(head - 1 + CAPACITY) % CAPACITY]! : 0
     const hadInput = count > 0 && newestT > lastSeenNewest
@@ -716,6 +798,9 @@ export const createPointerPredictor = (options: PredictorOptions = {}) => {
     headingY = 0
     msSinceReversal = 1e4
     reversalPeriodMs = 1e4
+    // What a count is worth is not part of the session. It is a property of the device, it does not change
+    // across a menu, and dropping it would put the noise floors back to assuming pixels for the first half
+    // second after every unlock — which is exactly when the hand is moving again.
   }
 
   return { push, pushFrame, update, reset }

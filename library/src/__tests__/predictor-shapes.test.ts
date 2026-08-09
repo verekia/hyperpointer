@@ -67,6 +67,10 @@ const LIMITS: Record<string, Limits> = {
   // A stir: small and quick enough that a whole horizon of it sweeps past a right angle, which is where the
   // arc has to stop being believed rather than wrap round.
   stir: { gain: 0.94, size: 15, over: 15, late: 40, kick: 0, back: 0, still: 0, lead: 50 },
+  // The same circle with a hand on it, so the quantisation error stops being a function of the angle and
+  // starts being noise. It scores like the clean one, which is what says the clean one is not being flattered
+  // by its own regularity.
+  'circle, hand-drawn': { gain: 0.34, size: 15, over: 25, late: 55, kick: 0, back: 0, still: 0, lead: 75 },
   'circle, reversed': { gain: 0.33, size: 9.5, over: 30, late: 50, kick: 0, back: 0, still: 0, lead: 75 },
   'figure eight': { gain: 0.86, size: 8.5, over: 15, late: 65, kick: 2, back: 4.5, still: 0, lead: 50 },
   spiral: { gain: 0.58, size: 8.5, over: 30, late: 75, kick: 0, back: 0, still: 0, lead: 95 },
@@ -156,6 +160,7 @@ describe('the shapes that must beat not guessing', () => {
     'flick, eased stop',
     'circle',
     'circle, tight and fast',
+    'circle, hand-drawn',
     'spiral',
     'point to point',
     'sharp corner',

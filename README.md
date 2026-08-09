@@ -234,6 +234,13 @@ The rest is mostly about not believing noise:
 
 - **Below a crawl there is no lead at all.** Whole mouse counts are all a slow hand produces, and a fit over
   four of them is mostly quantisation.
+- **What a count is worth is measured, not assumed.** Every noise floor is written in units of one count, and
+  a count is one pixel only on a mouse at ordinary sensitivity — a low-DPI one steps four, and so does
+  anything the OS or a device pixel ratio scales on the way through. Assumed, that put every floor four times
+  too low on such a device: it swung the guess 28° of heading a frame on a dead straight path and led a crawl
+  it should have refused. The deltas are the only thing that knows, and every delta is a whole number of
+  counts — so the grid they sit on is their greatest common divisor, which is the one reading of it that does
+  not mistake a coarse device for a fast hand.
 - **The parabola is believed only as far as the bend stands above the noise floor** — how hard a path of
   whole counts appears to bend when it is dead straight — and slides back to the straight line as that
   margin closes. Sample count is the wrong question: it counts the samples that carried motion, so a fast

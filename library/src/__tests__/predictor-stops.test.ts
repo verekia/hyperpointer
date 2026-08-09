@@ -3,7 +3,6 @@ import { describe, expect, test } from 'bun:test'
 import {
   ALL_DEVICES,
   BLUETOOTH,
-  COARSE,
   DEVICES,
   flick,
   glide,
@@ -170,19 +169,18 @@ describe('coming off a flick', () => {
     // backwards. That is a visible kick and no sample supports it: a guess may say the hand is about to
     // slow, it may not say the hand is about to reverse.
     //
-    // The low-DPI mouse is held to its own figure and it is not a good one — see the note on it in
-    // `predictor-devices.test.ts`. Its counts are four pixels wide, the turn rate is read against a floor
-    // written in units of one, and at the tail of a stop the held lead gets spun through a right angle by a
-    // turn that is entirely staircase. Four pixels of backwards lead is what that costs.
+    // Every device, with nothing set aside. The low-DPI mouse used to need four pixels of allowance here:
+    // its counts are four pixels wide, the turn rate was read against a floor written in units of one, and
+    // at the tail of a stop the held lead was spun through a right angle by a turn that was entirely
+    // staircase. With the count measured rather than assumed there is nothing left to allow.
     for (const device of ALL_DEVICES) {
-      const allowed = device === COARSE ? -6 : -0.05
       for (const fallMs of [40, 150, 400]) {
         let worst = 0
         framesOf({ path: flick(2.6, 20, 800, fallMs), device, durationMs: 800 + fallMs + 400 }).forEach(frame => {
           const along = frame.lead.x * Math.cos((20 * Math.PI) / 180) + frame.lead.y * Math.sin((20 * Math.PI) / 180)
           worst = Math.min(worst, along)
         })
-        expect(worst).toBeGreaterThanOrEqual(allowed)
+        expect(worst).toBeGreaterThanOrEqual(-0.05)
       }
     }
   })
