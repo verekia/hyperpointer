@@ -40,14 +40,27 @@ export type Device = {
   /** Pointer pixels per count. A high-DPI mouse at default sensitivity moves about a pixel per count; a low
    * one moves several, and a fit over four of those is looking at a staircase rather than a path. */
   countPx: number
+  /** Whether the page reads this device's positions rounded to whole pixels. A count is only a whole number
+   * of pixels when nothing has scaled it on the way through, and something almost always has — an OS pointer
+   * curve, a sensitivity slider, a device pixel ratio. Rounded, the deltas share no divisor with each other
+   * at all: a 3.7px step reaches the page as 4, 4, 3, 4, 4, 3, whose greatest common divisor is one. */
+  wholePixels?: boolean
 }
 
-const device = (name: string, periodMs: number, burst: number, jitterMs: number, countPx = 1): Device => ({
+const device = (
+  name: string,
+  periodMs: number,
+  burst: number,
+  jitterMs: number,
+  countPx = 1,
+  wholePixels = false,
+): Device => ({
   name,
   periodMs,
   burst,
   jitterMs,
   countPx,
+  wholePixels,
 })
 
 export const WIRED = device('wired', 1, 1, 0.1)
@@ -65,6 +78,13 @@ export const USB_8K = device('8KHz mouse', 0.125, 1, 0.05)
 /** Coarse counts: four pixels a step, which is what a low-DPI mouse reports. The path arrives as a
  * staircase, and every noise floor in the fit is written in units of one count. */
 export const COARSE = device('low-DPI mouse', 8, 1, 0.5, 4)
+/** A coarse mouse on a radio, reporting counts that are not a whole number of pixels — which is what an OS
+ * pointer curve or a sensitivity slider leaves behind, and what most real hardware therefore looks like. It
+ * is the one device here whose count size cannot be read off a shared divisor at all: rounded to whole
+ * pixels, a 3.7px step reaches the page as 4, 4, 3, 4, 4, 3, and those share nothing but one. Every floor in
+ * the fit is written in counts, so read as a pixel they sit a quarter of the way under the noise they exist
+ * to stand above, and the staircase gets believed as motion. */
+export const COARSE_RADIO = device('coarse radio', 8, 3, 2.5, 3.7, true)
 /** Counts finer than a pixel, which is what a page at a device pixel ratio of two reports. The floors were
  * tuned at a pixel and are held there rather than followed down: a device quieter than they assume costs a
  * little sensitivity, and one noisier than they assume is the bug this is the other side of. */
@@ -85,6 +105,7 @@ export const ALL_DEVICES: readonly Device[] = [
   BLUETOOTH,
   SLOW_RADIO,
   COARSE,
+  COARSE_RADIO,
   FINE,
   SPARSE,
 ]
@@ -235,7 +256,13 @@ export const replay = (options: ReplayOptions): Metrics => {
 
   // Whole counts, and a count is not always a pixel.
   const countPx = dev.countPx
-  const quantise = (value: number) => Math.trunc(value / countPx) * countPx
+  // Rounded about zero rather than towards positive infinity, or the grid itself has a favourite side of the
+  // screen and the mirror invariant fails on the rig rather than on the fit.
+  const toWhole = (value: number) => Math.sign(value) * Math.round(Math.abs(value))
+  const quantise = (value: number) => {
+    const stepped = Math.trunc(value / countPx) * countPx
+    return dev.wholePixels ? toWhole(stepped) : stepped
+  }
 
   let reportedX = 0
   let reportedY = 0

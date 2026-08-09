@@ -290,6 +290,16 @@ The rest is mostly about not believing noise:
   points the wrong way only scales it down. A hand doubling back faster than the window is long puts a cusp
   inside every window, and a parabola through a cusp is a fit to two paths at once whose slope belongs to
   neither — which is why a shake was the one shape the guess made worse than no guess at all.
+- **What a count is worth is measured two ways, because most hardware has no shared divisor.** The greatest
+  common divisor of the deltas is exact when there is one — and on real hardware there usually is not. A count
+  is a whole number of pixels only when nothing scaled it on the way through, and an OS pointer curve, a
+  sensitivity slider or a device pixel ratio almost always has: a 3.7px step reaches the page rounded as 4, 4,
+  3, 4, 4, 3, which share nothing but one. The divisor does not read wrong there, it reads _nothing_, and
+  falls back to assuming pixels — putting every floor a quarter of the way under the noise it exists to stand
+  above, so the staircase gets believed as motion. So the grid is also read off the scatter the samples leave
+  about the curve fitted through them, which needs no divisor: a position sitting anywhere inside a step of
+  width `q` is off by `q` over the root of twelve. On a coarse mouse on a radio that halved the worst change
+  of step, and the guess stopped adding anything to the unevenness the device already had.
 - **How fast the hand is going is asked of the window, not of the samples in it.** The two agree on a hand
   that is moving, since a moving hand reports throughout; they part on a hand that is not. A hand resting on
   the mouse still crosses a count boundary now and then, and two of those landing 3ms apart are a pixel over

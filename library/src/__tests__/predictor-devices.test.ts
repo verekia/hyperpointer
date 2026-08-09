@@ -5,6 +5,7 @@ import {
   ALL_DEVICES,
   BLUETOOTH,
   COARSE,
+  COARSE_RADIO,
   FINE,
   flick,
   glide,
@@ -50,6 +51,12 @@ describe('every device', () => {
     bluetooth: { fast: 0.73, slow: 0.25, gain: 0.28 },
     'slow radio': { fast: 0.64, slow: 0.29, gain: 0.36 },
     'low-DPI mouse': { fast: 0.75, slow: 0.65, gain: 0.24 },
+    // Wide counts and a radio together, with the counts not landing on whole pixels so their size cannot be
+    // read off a shared divisor at all. It sits with the other radio devices on a fast drag, which is what
+    // reading the size off the scatter instead bought — before that it was three times worse than any of
+    // them. A slow drag is where it stays hard: a count every 25ms is most of a window, and there is no
+    // amount of measurement that puts more of them in one.
+    'coarse radio': { fast: 0.9, slow: 3, gain: 0.32 },
     'half-pixel mouse': { fast: 0.06, slow: 0.08, gain: 0.08 },
     sparse: { fast: 0.95, slow: 0.29, gain: 0.29 },
   }
@@ -72,7 +79,7 @@ describe('every device', () => {
     // only the growth keeps every upward wobble of it for as long as the drag lasts. Exactly nothing, not
     // nearly nothing.
     for (const device of ALL_DEVICES) {
-      if (device === COARSE) continue
+      if (device === COARSE || device === COARSE_RADIO) continue
       const { worstLead, kept } = replay({ path: steady(0.06, 30), device, durationMs: 4000 })
       expect(worstLead).toBe(0)
       expect(kept).toBe(0)
@@ -83,6 +90,14 @@ describe('every device', () => {
     const coarse = replay({ path: steady(0.06, 30), device: COARSE, durationMs: 4000 })
     expect(coarse.worstLead).toBeLessThan(2)
     expect(coarse.kept).toBeLessThan(12)
+    // And the one whose counts cannot be recognised from a divisor at all takes longer still, because the
+    // reading that does recognise them is taken off the fit, and at a crawl the fit mostly declines to run.
+    // A count every 62ms is fewer than two in a window. This is the worst case in the library and it is
+    // still an improvement: reading the grid off the scatter took it from 6.8px of lead to 5.1, and what a
+    // ratchet keeps over four seconds from 36px to 27.
+    const coarseRadio = replay({ path: steady(0.06, 30), device: COARSE_RADIO, durationMs: 4000 })
+    expect(coarseRadio.worstLead).toBeLessThan(6)
+    expect(coarseRadio.kept).toBeLessThan(32)
   })
 
   test('a stalling frame clock does not throw the lead about', () => {
@@ -98,6 +113,7 @@ describe('every device', () => {
       bluetooth: 1.2,
       'slow radio': 1.9,
       'low-DPI mouse': 0.8,
+      'coarse radio': 1.3,
       'half-pixel mouse': 0.4,
       sparse: 1.7,
     }
@@ -160,6 +176,10 @@ describe('every device', () => {
       bluetooth: { withLead: 13.3, bare: 13.4 },
       'slow radio': { withLead: 14.6, bare: 14.5 },
       'low-DPI mouse': { withLead: 7.3, bare: 6.7 },
+      // The device the beat is worst on, and the guess adds nothing to it: 13.2 against the 13.4 the
+      // reported position manages on its own. That is the whole claim of this test standing up on the
+      // hardware most likely to break it.
+      'coarse radio': { withLead: 14, bare: 13.4 },
       'half-pixel mouse': { withLead: 3.1, bare: 2.8 },
       sparse: { withLead: 13.5, bare: 13.4 },
     }
@@ -248,6 +268,24 @@ describe('a device whose counts are wider than a pixel', () => {
     expect(aiming.gain).toBeLessThan(0.45)
   })
 
+  test('and is measured even when the deltas share no divisor at all', () => {
+    // The divisor is exact where there is one, and on real hardware there usually is not: an OS pointer
+    // curve, a sensitivity slider or a device pixel ratio leaves a count that is not a whole number of
+    // pixels, and rounded to whole ones a 3.7px step reaches the page as 4, 4, 3, 4, 4, 3 — which share
+    // nothing but one. Every floor in the fit is written in counts, so read as a pixel they sit a quarter of
+    // the way under the noise they exist to stand above and the staircase gets believed as motion.
+    //
+    // What it looked like: the worst change of step in the whole scoreboard, 17px against the 8.6 of a
+    // device reporting at the same rate with counts it could read. Measured off the scatter about the fitted
+    // curve instead — which needs no divisor, only that a position sitting inside a step of width q is off
+    // by q over the root of twelve — it sits with them.
+    const radio = replay({ path: steady(0.8, 30), device: BLUETOOTH, durationMs: 2500 })
+    const offGrid = replay({ path: steady(0.8, 30), device: COARSE_RADIO, durationMs: 2500 })
+    expect(offGrid.worstSizeStep).toBeLessThan(radio.worstSizeStep * 1.5)
+    // And a crawl on it is still refused, which is the same floors doing the same job at the other end.
+    expect(replay({ path: steady(0.06, 30), device: COARSE_RADIO, durationMs: 4000 }).meanLead).toBeLessThan(1)
+  })
+
   test('costs the curvature, which four-pixel counts genuinely cannot carry', () => {
     // **The trade, pinned so it can be argued with.** A second derivative over a window holding a handful of
     // four-pixel steps sits about 1.3 times its own noise, and a floor that knows what a count is worth now
@@ -262,7 +300,7 @@ describe('a device whose counts are wider than a pixel', () => {
     // change to how every device extrapolates, so it is a separate one, and these are the numbers it would
     // have to beat.
     for (const [name, gain] of [
-      ['circle', 0.94],
+      ['circle', 0.98],
       ['circle, hand-drawn', 0.94],
       ['circle, tight and fast', 1],
       ['spiral', 0.81],

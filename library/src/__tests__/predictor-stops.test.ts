@@ -114,7 +114,13 @@ describe('stopping', () => {
   // cost every scenario on the board, because it throttles the growth of a device that is merely mid-burst.
   // So each is held to its own figure, and the devices with no excuse are held to none.
   const GREW_ON_SAMPLES = 2.5
-  const GREW_ON_NOTHING: Record<string, number> = { bluetooth: 5.5, 'slow radio': 5, sparse: 4.5 }
+  const GREW_ON_NOTHING: Record<string, number> = {
+    bluetooth: 5.5,
+    'slow radio': 5,
+    sparse: 4.5,
+    // Bursts of three every 24ms, so it has the same excuse the other radio devices have.
+    'coarse radio': 5.5,
+  }
 
   test('what grows after a stop is the ramp arriving, not the guess inventing motion', () => {
     for (const device of ALL_DEVICES) {

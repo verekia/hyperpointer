@@ -130,6 +130,26 @@
 // motion. So the count is read off the deltas, which are the only thing that knows: every delta is a whole
 // number of counts, so the grid they sit on is their greatest common divisor, and unlike every other
 // statistic to hand that reading does not confuse a coarse device with a fast hand.
+//
+// **And read a second way, because most hardware has no such divisor.** A count is a whole number of pixels
+// only when nothing has scaled it on the way through, and something almost always has — an OS pointer curve,
+// a sensitivity slider, a device pixel ratio. What the page reads is rounded to whole pixels, so a 3.7px step
+// arrives as 4, 4, 3, 4, 4, 3, and the greatest common divisor of those is one. The divisor does not read
+// wrong on such a device; it reads nothing at all, and silently falls back to the assumption it was added to
+// replace. Every floor then sits a quarter of the way under the noise it exists to stand above, which is the
+// same failure as before with none of the same evidence that it is happening.
+//
+// The other reading needs no divisor. A count is a step the device cannot report between, so every sample
+// sits somewhere inside one, and the scatter that leaves about the curve fitted through them is the width of
+// the step: a position uniform across a step of width q is off by q over the root of twelve. That is a
+// measurement of the grid rather than a search for it, and it is available on every device, on every path,
+// whether or not the deltas happen to line up. The two disagree in only one direction — a divisor that fails
+// reads small, never large — so the wider of the two is the one believed.
+//
+// It is worth the most on the hardware most people have. A coarse mouse on a radio was the worst change of
+// step on the whole board, seventeen pixels against the eight and a half of a device reporting at the same
+// rate whose counts it could read; measured this way it sits with them, and the guess stops adding anything
+// to the unevenness the device already has.
 
 import type { PointerFrame } from './pointer.js'
 
@@ -200,6 +220,14 @@ const COUNT_WINDOW_MS = 250
 // Wider than this is not a count size, it is a caller scaling deltas into something that is not pixels, and
 // the floors have no business following it there.
 const MAX_COUNT_PX = 16
+// How long to settle the scatter reading of the grid into a figure worth using. A count size is a property
+// of the device and does not change, so this only has to be long enough that the reading stops wandering:
+// one window's scatter is a handful of samples about a curve and swings by a factor of three, while the
+// average of a second's worth of them lands within a fifth of the truth on every device measured.
+const GRAIN_MS = 400
+// A position sitting anywhere inside a step of width q is off by q over the root of twelve, so the scatter
+// the samples leave about the curve through them names the step that produced it.
+const GRAIN_PER_SD = Math.sqrt(12)
 // Deltas are whole counts, so a remainder this far under one is the division coming out even.
 const COUNT_EPSILON = 0.05
 // How much a least-squares curvature wobbles for a given amount of that quantisation, over a window of a
@@ -228,6 +256,15 @@ const MAX_FRAME_STEP = 1.5
 const AGE_SMOOTHING_MS = 120
 // How much longer the ramp gets when the window behind the guess is too thin to trust.
 const NOISE_EASE = 3
+// How far past its own silence the ramp should reach on a device that reports in bursts. A device handing
+// over three samples and then saying nothing for a frame moves the guess in steps of whatever arrived,
+// however good the fit behind it is, unless the ramp is long enough to bridge its own gaps — and how long
+// those gaps are is a property of the device that is already being learned for the stop signal. A device
+// that reports every frame has no quiet, so this is nothing on a wired mouse and on a trackpad.
+//
+// Scaled by how little there is to track, the same way the noise ease above is. Bridging a gap is worth
+// doing while the hand is holding its speed and not worth doing while it is coming off a flick, where the
+// ramp has to be short or the lead is handed back after the hand has already stopped.
 // How long to settle the judgement about whether the path really bends. That judgement also decides how
 // hard the lead is smoothed, so left to answer freshly every frame it switches the smoothing on and off.
 const CURVE_TRUST_MS = 150
@@ -378,6 +415,11 @@ export const createPointerPredictor = (options: PredictorOptions = {}) => {
   let countPx = QUANTISATION_PX
   let countThisWindow = 0
   let countLastWindow = 0
+  // The same question asked of the scatter rather than of a shared divisor, for the devices that have no
+  // shared divisor to find. Smallest reading wins within a window, because the widest a count can look is
+  // when the path itself is not straight, and two windows have to agree before it is believed.
+  let grainPx = QUANTISATION_PX
+  let gcdPx = QUANTISATION_PX
   let countWindowAt = -1
 
   const out: Lead = { x: 0, y: 0, live: 1 }
@@ -440,6 +482,8 @@ export const createPointerPredictor = (options: PredictorOptions = {}) => {
     let yy0 = 0
     let yy1 = 0
     let yy2 = 0
+    let pxx = 0
+    let pyy = 0
     let travelX = 0
     let travelY = 0
     let span = 0
@@ -475,6 +519,8 @@ export const createPointerPredictor = (options: PredictorOptions = {}) => {
       yy0 += py
       yy1 += u * py
       yy2 += u2 * py
+      pxx += px * px
+      pyy += py * py
       // What the hand actually did over the window, as opposed to what a curve through it says.
       travelX = -px
       travelY = -py
@@ -543,6 +589,7 @@ export const createPointerPredictor = (options: PredictorOptions = {}) => {
     let straight = 0
     let curved = 0
     let bend = 0
+    let level = 0
     const solve = (y0: number, y1: number, y2: number) => {
       straight = Math.abs(detLinear) < 1e-9 ? 0 : (s0 * y1 - s1 * y0) / detLinear
       if (!canCurve) {
@@ -552,16 +599,30 @@ export const createPointerPredictor = (options: PredictorOptions = {}) => {
       }
       curved = (-y0 * m01 + y1 * (s0 * s4 - s2 * s2) - y2 * (s0 * s3 - s1 * s2)) / detQuadratic
       bend = 2 * ((y0 * m02 - y1 * (s0 * s3 - s1 * s2) + y2 * (s0 * s2 - s1 * s1)) / detQuadratic)
+      level = (y0 * m00 - y1 * m01 + y2 * m02) / detQuadratic
     }
 
     solve(xy0, xy1, xy2)
     const straightX = straight
     const curvedX = curved
     const bendX = bend
+    const levelX = level
     solve(yy0, yy1, yy2)
     const straightY = straight
     const curvedY = curved
     const bendY = bend
+    if (canCurve && used > 3) {
+      // How far the samples scatter about the curve drawn through them. A count is a step the device cannot
+      // report between, so every reading sits somewhere inside one, and that scatter is the only reading of
+      // how wide a count is that does not need the deltas to share a divisor. A grid of width q leaves a
+      // standard deviation of q over the root of twelve, so the scatter names the grid.
+      const rss =
+        pxx -
+        (levelX * xy0 + curvedX * xy1 + (bendX / 2) * xy2) +
+        (pyy - (level * yy0 + curved * yy1 + (bend / 2) * yy2))
+      const spread = Math.sqrt(Math.max(0, rss) / (2 * used - 6))
+      grainPx += (spread * GRAIN_PER_SD - grainPx) * (1 - Math.exp(-deltaMs / GRAIN_MS))
+    }
 
     // How far the parabola is worth believing over the straight line: how hard the path bends, against how
     // hard a path of whole mouse counts appears to bend when it is dead straight. Sample count alone was
@@ -880,12 +941,17 @@ export const createPointerPredictor = (options: PredictorOptions = {}) => {
     // nothing to say and is simply extended, so a hand sitting still cannot make the answer expire.
     if (countWindowAt < 0) countWindowAt = nowMs
     else if (nowMs - countWindowAt >= COUNT_WINDOW_MS && countThisWindow > 0) {
-      const agreed = countLastWindow > 0 ? Math.min(countThisWindow, countLastWindow) : QUANTISATION_PX
-      countPx = Math.min(MAX_COUNT_PX, Math.max(QUANTISATION_PX, agreed))
+      gcdPx = countLastWindow > 0 ? Math.min(countThisWindow, countLastWindow) : QUANTISATION_PX
       countLastWindow = countThisWindow
       countThisWindow = 0
       countWindowAt = nowMs
     }
+
+    // Whichever of the two readings says the grid is wider. A shared divisor is exact when the deltas have
+    // one and says nothing at all when they do not, and the scatter is approximate but always available —
+    // so they disagree in only one direction, and it is the direction where believing the smaller answer is
+    // what puts every floor under the noise it is there to sit above.
+    countPx = Math.min(MAX_COUNT_PX, Math.max(QUANTISATION_PX, gcdPx, grainPx))
 
     const newestT = count > 0 ? times[(head - 1 + CAPACITY) % CAPACITY]! : 0
     const hadInput = count > 0 && newestT > lastSeenNewest
