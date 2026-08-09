@@ -99,6 +99,39 @@ So it is judged by eye, on a rig, against the OS cursor — which is drawn by th
 never late. The default of **1** was chosen that way on a 60Hz panel. Run the [rig](#the-rig), flip between
 1 and 2, and pick the one that tracks your cursor.
 
+## If the guess looks like it stutters
+
+Almost always it is the beat between how often the device reports and how often the screen refreshes, and it
+is there with or without a guess. Captured off a Bluetooth mouse reporting every 15ms into a 60Hz frame: **36%
+of frames carried no samples at all, 47% carried one and 16% carried two.** A hand at a dead constant speed
+therefore moves the picture 0px, then 45, then 90 — and the reported position does that just as much as the
+predicted one does. On that capture the reported marker's frame-to-frame travel varied by 15px at the median
+and 144px at the 95th; the predicted marker's by 17px and 142px. The guess is not what you are looking at.
+
+Nothing in the lead can remove it. The motion missing from a stale frame is arithmetic rather than a guess —
+the newest sample says exactly how stale it is — but that correction has to alternate every frame, and half
+this library's callers spend the lead through [`createLeadRatchet`](#createleadratchet), which keeps growth
+and never gives it back. Feeding an alternating term through a ratchet turns it into permanent drift.
+Smoothing delivery on the way in instead costs real latency: releasing motion on a 12ms time constant cuts the
+worst step by a quarter at 60Hz and more than half at 144Hz, and hands back 11–17px of lateness at 2px/ms —
+about two thirds of a frame, which is most of what the lead was bought to remove.
+
+What you can change is how fast the guess itself is allowed to move, with [`decayMs`](#createpointerpredictor).
+Measured on that same capture, at 60Hz:
+
+| `decayMs`    | how much the lead's size moves per frame | mean lead |
+| ------------ | ---------------------------------------- | --------- |
+| 30 (default) | 7.8px                                    | 28.5px    |
+| 60           | 4.4px                                    | 22.4px    |
+| 100          | 2.7px                                    | 17.9px    |
+
+Doubling it roughly halves the swim while keeping about four fifths of the lead. It is a feel setting and the
+right value is a matter of taste, so it is yours rather than the library's: a hand that wants the marker
+locked to the cursor wants the short ramp, and one that wants the picture calm wants the long one.
+
+`?raw=1` on the [rig](#the-rig) logs every sample the predictor is fed, which is how the figures above were
+taken. If something looks wrong on a device, that is the thing to capture.
+
 ## API
 
 ### `createPointerBuffer(options?)`
