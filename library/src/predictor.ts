@@ -157,7 +157,7 @@ import type { PointerFrame } from './pointer.js'
 // measured on a rig only means something if it is the lead the thing being measured actually applies.
 export const DEFAULT_LEAD_FRAMES = 1
 export const DEFAULT_MAX_LEAD_PX = 100
-export const DEFAULT_DECAY_MS = 30
+export const DEFAULT_DECAY_MS = 60
 
 const WINDOW_MS = 40
 // The least time a window may cover and still be worth extrapolating from.
@@ -903,7 +903,35 @@ export const createPointerPredictor = (options: PredictorOptions = {}) => {
     // it was bought — the noise a fit makes on a hand picking up speed is the thing the ramp is for, and
     // trailing on the way up costs nothing worse than the lateness this whole library exists to remove.
     const rampLag = alongAcceleration < 0 ? alongAcceleration * horizon * rampMs : 0
-    const distance = Math.max(0, travelled + rampLag)
+    // Floored at where the ramp lands on the hand, not at zero. Those are different places and treating them
+    // as one switched the compensation off exactly where it does its work: into a stop the target falls
+    // faster than at any other moment, so the aim that would leave the lead at zero is an aim below zero, and
+    // floored there the correction vanished. The guess still held 43% of its cruise lead on the frame the
+    // hand came to rest, and every pixel of that was handed back afterwards with the hand already still.
+    //
+    // Aiming behind the hand is not the same as guessing the hand will go backwards. It is a statement about
+    // the filter rather than about the path: a first-order lag trails its target, so the way to land it on a
+    // falling target is to point it past. What must not follow is the answer itself ending up behind the
+    // hand, which is a visible kick nothing in the samples supports — so the aim is bounded by exactly the
+    // point where the ramp would reach zero this frame, and no further. Aiming past that buys nothing in any
+    // case: the most a lag can do in one step is arrive.
+    //
+    // And below zero only as far as this is a hand stopping rather than a hand turning. The fitted speed
+    // falls at a corner as surely as it falls at a stop — the chord of a window that bends is shorter than
+    // the path it cuts — but at a corner there is nothing to compensate for: the speed is not going away,
+    // only the heading. Aimed under zero there it took the size of the guess down with it and put a step in
+    // the picture going round a corner. The same reading that tells a brake from a bend tells this one, and
+    // it is the other axis that carries it.
+    //
+    // How much this is worth depends on the ramp it is correcting, which is why it ships now and did not
+    // before: the lag being compensated is proportional to the ramp's own length, so at the shorter ramp the
+    // clamp cost a little and at this one it cost most of the settling. Measured across the board, leaving it
+    // in place at the longer ramp made the picture drift further after a stop than the shorter ramp ever did.
+    const heldAlong = leadX * tx + leadY * ty
+    const stepRate = 1 - Math.exp(-deltaMs / rampMs)
+    const aimed = travelled + rampLag
+    const lowest = stepRate > 0 && heldAlong > 0 ? heldAlong * (1 - 1 / stepRate) : 0
+    const distance = aimed >= 0 ? aimed : Math.max(lowest, aimed * slowing)
 
     const swept = Math.max(-MAX_TURN_RAD, Math.min(MAX_TURN_RAD, turn * horizon))
     let along = distance

@@ -121,13 +121,19 @@ Measured on that same capture, at 60Hz:
 
 | `decayMs`    | how much the lead's size moves per frame | mean lead |
 | ------------ | ---------------------------------------- | --------- |
-| 30 (default) | 7.8px                                    | 28.5px    |
-| 60           | 4.4px                                    | 22.4px    |
+| 30           | 7.8px                                    | 28.5px    |
+| 60 (default) | 4.4px                                    | 22.4px    |
 | 100          | 2.7px                                    | 17.9px    |
 
-Doubling it roughly halves the swim while keeping about four fifths of the lead. It is a feel setting and the
-right value is a matter of taste, so it is yours rather than the library's: a hand that wants the marker
-locked to the cursor wants the short ramp, and one that wants the picture calm wants the long one.
+The default was 30 and is now 60, chosen the way `leadFrames` was: by eye, on the rig, against the cursor.
+Across every device and shape the rig has, the longer ramp moves every artefact the right way — the size of
+the guess steps 21% less between frames, it changes speed 19% less, it overshoots 11% less, it moves against
+the hand 5% less, and a ratchet keeps 13% less of it for good. What it costs is accuracy: the guess removes
+about 52% of the lateness where the shorter ramp removed 57%, and a hand that reverses hard takes a few more
+frames to be led the other way.
+
+Shorter is still right for a hand that wants the marker welded to the cursor. `?decay=` on the
+[rig](#the-rig) flips between them while you watch.
 
 `?raw=1` on the [rig](#the-rig) logs every sample the predictor is fed, which is how the figures above were
 taken. If something looks wrong on a device, that is the thing to capture.
@@ -169,14 +175,14 @@ rather than from now.
 Guesses where the pointer will be when the frame reaches the screen.
 
 ```ts
-const predictor = createPointerPredictor({ leadFrames: 1, maxLeadPx: 100, decayMs: 30 })
+const predictor = createPointerPredictor({ leadFrames: 1, maxLeadPx: 100, decayMs: 60 })
 ```
 
 | option       | default | meaning                                                                                                                                 |
 | ------------ | ------- | --------------------------------------------------------------------------------------------------------------------------------------- |
 | `leadFrames` | `1`     | How many display refreshes ahead to guess. See [above](#choosing-leadframes).                                                           |
 | `maxLeadPx`  | `100`   | How far you are willing to be led, whatever the samples say. Applied to the vector, not to each axis, or a diagonal gets it twice over. |
-| `decayMs`    | `30`    | Time constant of the ramp that eases the lead in and out, so a correction is a change of speed rather than a jump.                      |
+| `decayMs`    | `60`    | Time constant of the ramp that eases the lead in and out, so a correction is a change of speed rather than a jump.                      |
 
 Exported as `DEFAULT_LEAD_FRAMES`, `DEFAULT_MAX_LEAD_PX`, `DEFAULT_DECAY_MS`.
 

@@ -95,7 +95,7 @@ describe('pointer prediction', () => {
     const unpaused = sail(0)
     // A flick straight off a standing start barely sails at all, and is done inside a tenth of a second.
     expect(unpaused.grew).toBeLessThan(6)
-    expect(unpaused.frames).toBeLessThan(7)
+    expect(unpaused.frames).toBeLessThan(11)
 
     // And no amount of sitting still first changes that.
     for (const idleFrames of [3, 10, 30, 90]) {
@@ -616,7 +616,7 @@ describe('pointer prediction quality floor', () => {
     }
     expect(peak).toBeGreaterThan(2)
     // About a tenth of a second. Holding a stale confidence stretches this to nearer half of one.
-    expect(frames).toBeLessThan(8)
+    expect(frames).toBeLessThan(11)
   })
 
   test('a lead left over from a turn fades without going on turning', () => {

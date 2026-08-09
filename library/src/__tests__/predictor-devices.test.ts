@@ -43,22 +43,22 @@ describe('every device', () => {
   // nothing else — the low-DPI mouse sits with the other devices of its rate rather than thirty times worse
   // than them, which is the whole of what measuring the count size bought.
   const STEADY: Record<string, { fast: number; slow: number; gain: number }> = {
-    wired: { fast: 0.05, slow: 0.09, gain: 0.06 },
-    '8KHz mouse': { fast: 0.04, slow: 0.07, gain: 0.05 },
-    '500Hz mouse': { fast: 0.05, slow: 0.09, gain: 0.07 },
-    '125Hz mouse': { fast: 0.2, slow: 0.18, gain: 0.14 },
-    trackpad: { fast: 0.23, slow: 0.18, gain: 0.17 },
-    bluetooth: { fast: 0.73, slow: 0.25, gain: 0.28 },
-    'slow radio': { fast: 0.64, slow: 0.29, gain: 0.36 },
-    'low-DPI mouse': { fast: 0.75, slow: 0.65, gain: 0.24 },
+    wired: { fast: 0.09, slow: 0.05, gain: 0.06 },
+    '8KHz mouse': { fast: 0.07, slow: 0.04, gain: 0.05 },
+    '500Hz mouse': { fast: 0.09, slow: 0.05, gain: 0.08 },
+    '125Hz mouse': { fast: 0.22, slow: 0.07, gain: 0.13 },
+    trackpad: { fast: 0.25, slow: 0.08, gain: 0.16 },
+    bluetooth: { fast: 0.58, slow: 0.13, gain: 0.27 },
+    'slow radio': { fast: 0.48, slow: 0.14, gain: 0.35 },
+    'low-DPI mouse': { fast: 0.3, slow: 0.1, gain: 0.22 },
     // Wide counts and a radio together, with the counts not landing on whole pixels so their size cannot be
     // read off a shared divisor at all. It sits with the other radio devices on a fast drag, which is what
     // reading the size off the scatter instead bought — before that it was three times worse than any of
     // them. A slow drag is where it stays hard: a count every 25ms is most of a window, and there is no
     // amount of measurement that puts more of them in one.
-    'coarse radio': { fast: 0.9, slow: 3, gain: 0.32 },
-    'half-pixel mouse': { fast: 0.06, slow: 0.08, gain: 0.08 },
-    sparse: { fast: 0.95, slow: 0.29, gain: 0.29 },
+    'coarse radio': { fast: 0.6, slow: 1.23, gain: 0.3 },
+    'half-pixel mouse': { fast: 0.11, slow: 0.04, gain: 0.08 },
+    sparse: { fast: 0.53, slow: 0.13, gain: 0.28 },
   }
 
   for (const device of ALL_DEVICES) {
@@ -105,17 +105,17 @@ describe('every device', () => {
     // for one. Believing it moves the horizon by two frames and hands over pixels of lead on the frame after
     // every stall.
     const ALLOWED: Record<string, number> = {
-      wired: 0.45,
-      '8KHz mouse': 0.35,
-      '500Hz mouse': 0.4,
-      '125Hz mouse': 0.25,
+      wired: 0.28,
+      '8KHz mouse': 0.26,
+      '500Hz mouse': 0.27,
+      '125Hz mouse': 0.38,
       trackpad: 0.55,
-      bluetooth: 1.2,
-      'slow radio': 1.9,
-      'low-DPI mouse': 0.8,
-      'coarse radio': 1.3,
-      'half-pixel mouse': 0.4,
-      sparse: 1.7,
+      bluetooth: 0.72,
+      'slow radio': 1.53,
+      'low-DPI mouse': 0.53,
+      'coarse radio': 0.97,
+      'half-pixel mouse': 0.25,
+      sparse: 0.97,
     }
     for (const device of ALL_DEVICES) {
       const { worstSizeStep } = replay({ path: steady(0.8, 30), device, durationMs: 3000, hitchEvery: 20 })
@@ -139,7 +139,7 @@ describe('every device', () => {
     // ...and then stops, because a sample two frames old is not news.
     expect(leads[3]!.run.meanLead).toBeLessThan(42)
     for (const { run } of leads) {
-      expect(run.worstSizeStep).toBeLessThan(0.3)
+      expect(run.worstSizeStep).toBeLessThan(0.42)
       expect(run.gain).toBeLessThan(0.45)
     }
 
@@ -300,11 +300,11 @@ describe('a device whose counts are wider than a pixel', () => {
     // change to how every device extrapolates, so it is a separate one, and these are the numbers it would
     // have to beat.
     for (const [name, gain] of [
-      ['circle', 0.98],
+      ['circle', 0.95],
       ['circle, hand-drawn', 0.94],
       ['circle, tight and fast', 1],
       ['spiral', 0.81],
-      ['figure eight', 0.84],
+      ['figure eight', 0.95],
       ['serpentine', 0.6],
       ['wide slow arc', 0.31],
     ] as const) {
@@ -354,7 +354,9 @@ describe('a device whose counts are wider than a pixel', () => {
     let worst = Infinity
     // The window straight after the regular one, which is the only one a single-window answer would reach.
     for (let frame = 0; frame < 15; frame++) worst = Math.min(worst, step(frame % 3 === 0 ? 4 : 3))
-    expect(worst).toBeGreaterThan(2.8)
+    // A longer ramp reaches less of the answer in the fifteen frames this watches, so the figure is lower
+    // than it was without the floors having moved at all — which is what this is about.
+    expect(worst).toBeGreaterThan(2.1)
   })
 
   test('is found on whichever axis the hand is using', () => {
@@ -448,8 +450,8 @@ describe('every refresh rate', () => {
       // Both figures are held at every rate rather than at 60Hz alone, because everything the ramp and the
       // horizon do is written in milliseconds and a shorter frame is a different number of them.
       const LIMITS: Record<string, { size: number; gain: number; over: number; still: number }> = {
-        '30Hz': { size: 1, gain: 0.19, over: 33, still: 11 },
-        '60Hz': { size: 0.75, gain: 0.28, over: 38, still: 9 },
+        '30Hz': { size: 1, gain: 0.19, over: 33, still: 14 },
+        '60Hz': { size: 0.75, gain: 0.28, over: 38, still: 11 },
         '120Hz': { size: 0.5, gain: 0.43, over: 30, still: 9 },
         '144Hz': { size: 0.62, gain: 0.45, over: 29, still: 9 },
       }
