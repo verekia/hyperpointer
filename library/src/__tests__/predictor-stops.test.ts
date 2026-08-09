@@ -95,6 +95,54 @@ describe('stopping', () => {
     }
   })
 
+  // How much the guess may grow after the hand has stopped, on a frame that carried samples and on one that
+  // carried none. The two are different questions and only the second is the promise above.
+  //
+  // Asked at a single drag length, that promise passes on luck. Which report phase the stop lands on decides
+  // everything, and swept across ten of them the same devices grow by up to 4.4px on a frame after the hand
+  // is already still — 900ms simply lands somewhere they do not.
+  //
+  // Swept, it splits cleanly. Every device that reports at least once a frame grows only where it has been
+  // told something, and by nothing at all on an empty frame: the promise holding exactly. What growth they
+  // do show is the ramp still closing on a target real samples asked for, which a short drag ends before it
+  // arrives — lateness being paid off, not motion being invented.
+  //
+  // The three that report in bursts do grow on empty frames, and that is the tolerance working rather than a
+  // hole in it. A mouse on a radio leaves a third of its frames empty while moving perfectly steadily, and
+  // holding across its own burst gap only to catch up in one step is worse on screen than the lateness it
+  // saves. Softening that gate into a fraction of the gap was tried: it cut this figure by two thirds and
+  // cost every scenario on the board, because it throttles the growth of a device that is merely mid-burst.
+  // So each is held to its own figure, and the devices with no excuse are held to none.
+  const GREW_ON_SAMPLES = 2.5
+  const GREW_ON_NOTHING: Record<string, number> = { bluetooth: 5.5, 'slow radio': 5, sparse: 4.5 }
+
+  test('what grows after a stop is the ramp arriving, not the guess inventing motion', () => {
+    for (const device of ALL_DEVICES) {
+      let onSamples = 0
+      let onNothing = 0
+      for (const movingMs of [120, 160, 200, 260, 340, 450, 600, 900, 1500, 3000]) {
+        const frames = framesOf({
+          path: stopsAt(movingMs),
+          device,
+          durationMs: movingMs + 700,
+        }).filter(frame => frame.frameAt >= movingMs)
+        for (let i = 1; i < frames.length; i++) {
+          const before = frames[i - 1]!
+          const now = frames[i]!
+          const grew = size(now) - size(before)
+          if (grew <= 0) continue
+          // Whether this frame was told anything at all, which is the whole question.
+          const told = now.reported.x !== before.reported.x || now.reported.y !== before.reported.y
+          if (told) onSamples = Math.max(onSamples, grew)
+          else onNothing = Math.max(onNothing, grew)
+        }
+      }
+      expect(`${device.name} on samples: ${onSamples < GREW_ON_SAMPLES}`).toBe(`${device.name} on samples: true`)
+      const allowed = GREW_ON_NOTHING[device.name] ?? 0.05
+      expect(`${device.name} on nothing: ${onNothing < allowed}`).toBe(`${device.name} on nothing: true`)
+    }
+  })
+
   test('how long the hand moved first does not change how the stop ends', () => {
     // The window is a fixed forty milliseconds, so a flick and a long drag end the same way. Anything that
     // makes a long drag unwind more slowly is state that has been accumulating where it should not.
