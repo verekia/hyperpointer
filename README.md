@@ -282,16 +282,18 @@ The rest is mostly about not believing noise:
 
 ## The rig
 
-`example/` is a cursor-to-photon rig: markers chase the OS cursor so a slow-motion recording can measure the
+`example/` is a cursor-to-photon rig: markers chase the OS pointer so a slow-motion recording can measure the
 gap to it. That is the only way to see presentation latency — no clock inside the page can observe it.
 
 ```bash
 bun i && bun dev
 ```
 
-The red square is the reported position, the green circle is the prediction, and the OS cursor is the truth
-(the compositor draws it, so it is never late). `?compare=1` shows two leads at once; `?nocursor=1`,
-`?noreported=1` and `?nopredicted=1` strip the frame down to what you want to read.
+The red square is the reported position, the green circle is the prediction, and the white dot is the truth:
+it is the OS pointer wearing a cursor image, so the compositor still draws it and it is still never late — an
+arrow is simply a poor shape to judge a circle against, being pointed rather than centred on the position it
+means. `?compare=1` shows two leads at once; `?nocursor=1`, `?noreported=1` and `?nopredicted=1` strip the
+frame down to what you want to read.
 
 ## Changing the prediction
 
