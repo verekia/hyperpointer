@@ -8,7 +8,7 @@
     "dev": "portless hyperpointer next dev",
     "build": "next build",
     "start": "serve out",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "bun check"
   },
   "dependencies": {
     "hyperpointer": "workspace:*",
